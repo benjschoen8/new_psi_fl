@@ -50,9 +50,26 @@ CIFAR_KW = {"en": "plane car bird cat deer dog frog horse ship truck",
             "de": "Flugzeug Auto Vogel Katze Hirsch Hund Frosch Pferd Schiff Lastwagen"}
 
 
+# English-only: writer k (lang 'en0', 'en1', 'en2') names the same class in its own words
+EN_VARIANTS = {"airplane": ["airplane", "plane", "aircraft"], "automobile": ["car", "automobile", "auto"],
+               "bird": ["bird", "birds", "songbird"], "cat": ["cat", "kitty", "feline"],
+               "deer": ["deer", "stag", "deers"], "dog": ["dog", "puppy", "canine"],
+               "frog": ["frog", "toad", "frogs"], "horse": ["horse", "pony", "stallion"],
+               "ship": ["ship", "boat", "vessel"], "truck": ["truck", "lorry", "pickup"]}
+
+
 def keyword(dataset, name, lang):
-    """The bare word a client types for its label (fuzzy union): 'three', 'tres', '三', 'gato', 'g'."""
+    """The bare word a client types for its label (fuzzy union): 'three', 'tres', '三', 'gato', 'g'.
+    lang 'en0'/'en1'/'en2': English writers with different wordings ('car' / 'automobile' / 'auto',
+    'three' / '3' / 'three')."""
     name = str(name)
+    if lang[:2] == "en" and lang[2:].isdigit():
+        k = int(lang[2:])
+        if name.isdigit() and len(name) == 1:
+            return (DIGIT["en"][int(name)], name, DIGIT["en"][int(name)])[k % 3]
+        if name in EN_VARIANTS:
+            return EN_VARIANTS[name][k % 3]
+        return name
     if name.isdigit() and len(name) == 1:
         return DIGIT_KW[lang][int(name)]
     if len(name) == 1 and name.isalpha():                         # Latin letters are written as is

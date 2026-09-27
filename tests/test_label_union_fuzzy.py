@@ -4,7 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
-from label_union.fuzzy_union import anchor_classes, anchor_words, client_keys, components, union
+from label_union.fuzzy_union import (anchor_classes, anchor_words, client_keys, components, false_friends,
+                                     hub_penalty, union)
 
 
 def unit(v):
@@ -48,7 +49,24 @@ class FuzzyAnchorTests(unittest.TestCase):
         chain = unit([[1, 0], [.96, .28], [.8, .6], [.6, .8]])               # 0-1 mutual, 2 and 3 not chained in
         self.assertEqual(anchor_classes(chain, .5).tolist(), [0, 0, 1, 1])
 
-    def test_letters_and_digits_keep_their_text(self):
+    def test_hub_penalty_stops_a_hub_capturing_keywords(self):
+        A = unit(np.vstack([np.eye(4), np.ones(4)]))                          # 4 = hub, cos .5 to every word
+        x = unit([[1, .4, .4, .4]])                                          # word 0, but a bit closer to the hub
+        cls = anchor_classes(A, 1)
+        self.assertEqual(client_keys(['x'], ['kw'], x, A, cls, 0)['x'], 'anchor:4')
+        self.assertEqual(client_keys(['x'], ['kw'], x, A, cls, 0, pen=hub_penalty(A, 2))['x'], 'anchor:0')
+
+    def test_false_friends_are_skipped_for_their_language(self):
+        w = anchor_words()
+        chat, cat = w.index('chat'), w.index('cat')
+        self.assertIn(chat, false_friends('fr', len(w)))
+        self.assertNotIn(chat, false_friends('en', len(w)))
+        self.assertNotIn(cat, false_friends('fr', len(w)))
+        A = unit([[1, 0], [.9, .44]])                                        # 0 = 'chat', 1 = 'cat'
+        k = lambda skip: client_keys(['cat'], ['chat'], A[:1], A, anchor_classes(A, 1), 0, skip=skip)['cat']
+        self.assertEqual((k(()), k(np.array([0]))), ('anchor:0', 'anchor:1'))
+
+    def test_letters_keep_their_text(self):
         words, A, emb = fake_space(['a'], {'a': ['a']})
         v = np.stack([emb('a'), emb('a')])
         self.assertEqual(client_keys(['A', 'a'], ['A', 'a'], v, A, anchor_classes(A, 1), .3),

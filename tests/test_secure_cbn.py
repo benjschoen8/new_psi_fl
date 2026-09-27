@@ -171,8 +171,8 @@ class CBNFuzzyTests(unittest.TestCase):
         A = np.array([unit(center[c] + .05 * rng.standard_normal(32)) for c in self.WORDS for _ in (0, 1)])
         self.patches = [mock.patch.object(encoder, 'embed', lambda texts, model=None, cache_dir=None:
                                           np.array([vec[t] for t in texts])),
-                        mock.patch.object(fuzzy_union, 'load_anchors', lambda model, n, merge:
-                                          (A, fuzzy_union.anchor_classes(A, merge)))]   # 2 synonyms per concept
+                        mock.patch.object(fuzzy_union, 'load_anchors', lambda model, n, merge, hub=0:
+                                          (A, fuzzy_union.anchor_classes(A, merge), fuzzy_union.hub_penalty(A, hub)))]   # 2 synonyms per concept
         for p in self.patches:
             p.start()
 

@@ -8,8 +8,12 @@ Each client, locally and before anything is sent:
      `anchors` are used);
   3. replaces that word by its synonym class: mutual nearest neighbours of the vocabulary with
      cosine >= `merge` ('boat' / 'ship'; pairs only, so no chains), public, identical at every client.
-A single Latin letter or digit keeps its own text, case kept: symbols are written the same in every
-language, and 'A' vs 'a' is a visual distinction an encoder does not make.
+Snapping score (step 2) is CSLS when hub = k > 0: 2 cos(x, a) - mean cos of a to its k nearest anchors,
+so 'hub' words that sit close to everything ('dna', 'asian') stop capturing keywords. A client that
+declares its language skips anchors more frequent in that language than in English (public wordfreq
+list anchor_false_friends.json): French 'chat' must not snap to English 'chat'.
+A single Latin letter keeps its own text, case kept: letters are written the same in every language,
+and 'A' vs 'a' is a visual distinction an encoder does not make ('3' still snaps, so it can meet 'three').
 The class id (| image-domain code) is then an ordinary exact label and oprf_union_with_keys runs
 unchanged. A keyword whose nearest anchor has cosine < `floor` keeps its own text (it then matches
 identical wording only).
@@ -28,7 +32,8 @@ import numpy as np
 
 PARAMS_FILE = Path(__file__).with_name('fuzzy_params.json')
 WORDS_FILE = Path(__file__).with_name('anchor_words.txt')
-DEFAULTS = dict(anchors=20000, merge=.8, floor=.3)                 # overridden by fuzzy_params.json
+FALSE_FRIENDS = Path(__file__).with_name('anchor_false_friends.json')
+DEFAULTS = dict(anchors=20000, merge=.8, floor=.3, hub=0)                 # overridden by fuzzy_params.json
 
 
 def params():
@@ -74,21 +79,43 @@ def anchor_classes(A, merge):
     return np.arange(len(A)) if merge >= 1 else components(len(A), mutual_pairs(A, merge))
 
 
+def hub_penalty(A, k, block=2048):
+    """Mean cosine of every anchor to its k nearest other anchors (0 if k = 0)."""
+    if not k:
+        return np.zeros(len(A), np.float32)
+    out = np.empty(len(A), np.float32)
+    for s in range(0, len(A), block):
+        S = A[s:s + block] @ A.T
+        S[np.arange(len(S)), np.arange(s, s + len(S))] = -2
+        out[s:s + len(S)] = np.partition(S, -k, 1)[:, -k:].mean(1)
+    return out
+
+
+def false_friends(lang, n):
+    """Anchor indices < n that are more frequent in lang than in English (public)."""
+    ff = json.loads(FALSE_FRIENDS.read_text()).get((lang or 'en')[:2], [])
+    return np.array([i for i in ff if i < n], int)
+
+
 @lru_cache(maxsize=4)
-def load_anchors(model, n, merge):
+def load_anchors(model, n, merge, hub=0):
     from label_union import encoder
     A = encoder.embed(anchor_words(n), model)
-    return A, anchor_classes(A, merge)
+    return A, anchor_classes(A, merge), hub_penalty(A, hub)
 
 
-def client_keys(labels, texts, E, A, cls, floor, domains=None):
-    """Local: {label: exact key}. E = embeddings of this client's keywords (texts)."""
+def client_keys(labels, texts, E, A, cls, floor, domains=None, pen=None, skip=()):
+    """Local: {label: exact key}. E = embeddings of this client's keywords (texts); pen = hub
+    penalty per anchor (CSLS), skip = anchors this client ignores (its language's false friends)."""
     S = E @ A.T
-    near = S.argmax(1)
+    score = 2 * S - (0 if pen is None else pen)
+    if len(skip):
+        score[:, skip] = -np.inf
+    near = score.argmax(1)
     out = {}
     for x, t, j, s in zip(labels, texts, near, S[np.arange(len(labels)), near]):
         t = unicodedata.normalize('NFKC', t).strip()
-        symbol = len(t) == 1 and t.isascii() and t.isalnum()
+        symbol = len(t) == 1 and t.isascii() and t.isalpha()
         key = f'anchor:{cls[j]}' if s >= floor and not symbol else 'text:' + t
         out[x] = key + (f'|{domains[x]}' if domains else '')
     return out
@@ -98,12 +125,13 @@ def local_keys(names, keywords, p, domains=None):
     """Every client's step 1-3 (simulated together; each only touches its own keywords)."""
     from label_union import encoder
     model = p.get('model', encoder.DEFAULT_MODEL)
-    A, cls = load_anchors(model, p['anchors'], p['merge'])
+    A, cls, pen = load_anchors(model, p['anchors'], p['merge'], p.get('hub', 0))
+    langs = p.get('langs') or [None] * len(names)                        # each client's own language
     out = []
     for i, labels in enumerate(names):
         texts = [keywords[i][x] for x in labels]
         out.append(client_keys(labels, texts, encoder.embed(texts, model), A, cls, p['floor'],
-                               domains[i] if domains else None))
+                               domains[i] if domains else None, pen, false_friends(langs[i], len(A))))
     return out
 
 

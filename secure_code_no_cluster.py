@@ -404,8 +404,9 @@ def main():
                         '(--fuzzy-langs), snapped locally to public anchor classes by a cross-lingual encoder, then exact union (label_union.fuzzy_union; '
                         'parameters from tests/fuzzy_threshold.py); mpc = clients-only MPC over the dictionary; '
                         'secagg = indicator vectors (Aggregator also learns names and holder counts)')
-    p.add_argument('--fuzzy-langs', default='en,zh,es,ja,fr,de',
-                   help='--union fuzzy: client i writes its label keywords in language i mod len (rt_descriptions.keyword)')
+    p.add_argument('--fuzzy-langs', default='en0,en1,en2',
+                   help='--union fuzzy: client i writes its label keywords as writer i mod len (en0,en1,en2 = English, '
+                        'different wordings; or en,zh,es,ja,fr,de; rt_descriptions.keyword)')
     p.add_argument('--code-dim', type=int, default=128)
     p.add_argument('--dictionary', type=Path, help='public dictionary: one canonical label id per line')
     p.add_argument('--devices', help='comma list, e.g. cuda:0,cuda:1 or mps,cpu; clients are spread round-robin')
@@ -467,13 +468,14 @@ def main():
         raise SystemExit('--gen cbn needs --union oprf or fuzzy (the KEM keys come from the union)')
     if args.union == 'fuzzy' and args.gen != 'cbn':
         raise SystemExit('--union fuzzy needs --gen cbn')
-    keywords = None
+    keywords = fuzzy = None
     if args.union == 'fuzzy':                                             # each client's own words
         from rt_descriptions import keyword
         langs = args.fuzzy_langs.split(',')
         dataset_of = {cid: name for name, cid, _ in tests}
         keywords = [{x: keyword(dataset_of.get(c.id, ''), x, langs[j % len(langs)]) for x in spaces[c.id]}
                     for j, c in enumerate(clients)]
+        fuzzy = dict(langs=[langs[j % len(langs)] for j in range(len(clients))])   # each client knows its own
     if args.resume:
         out = args.output or args.resume.parent                            # keep appending to that run
         out.mkdir(parents=True, exist_ok=True)
@@ -507,7 +509,7 @@ def main():
                                 quantize=not args.no_quantize, keep_frac=args.keep_frac,
                                 quant_scale0=args.quant_scale0, min_holders=args.min_holders,
                                 warmup_epochs=args.warmup_epochs,
-                                union='fuzzy' if args.union == 'fuzzy' else 'exact', keywords=keywords, **common)
+                                union='fuzzy' if args.union == 'fuzzy' else 'exact', keywords=keywords, fuzzy=fuzzy, **common)
     else:
         result = run(clients, spaces, tests, gen_f, disc_f, cls_f, config, dictionary, code_dim=code_dim,
                      union=args.union, **common)
