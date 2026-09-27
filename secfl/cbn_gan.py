@@ -99,7 +99,7 @@ def set_rows(g, table, which=None):
     for k in sorted(sd):
         if _is_row(k):
             w = sd[k].shape[1]
-            sd[k][list(which)] = torch.as_tensor(np.asarray(table)[:, off:off + w], dtype=sd[k].dtype)
+            sd[k][list(which)] = torch.as_tensor(np.asarray(table)[:, off:off + w], dtype=sd[k].dtype, device=sd[k].device)
             off += w
     g.load_state_dict(sd)
 

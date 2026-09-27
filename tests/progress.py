@@ -39,7 +39,12 @@ def status(run, width):
         eta = f'ETA {fmt((total - done_rounds) * per)}' if per else ''
     fill = int(width * done_rounds / total) if total else 0
     acc = f"acc {rows[-1]['accuracy']:.4f}" if rows else ''
-    return f"{run.name:<15} [{'#' * fill}{'.' * (width - fill)}] {done_rounds:>3}/{total:<3} {state:<9} {acc:<11} {eta}"
+    line = f"{run.name:<15} [{'#' * fill}{'.' * (width - fill)}] {done_rounds:>3}/{total:<3} {state:<9} {acc:<11} {eta}"
+    if state in ('loading', 'setup') and log.exists():                # show what it is doing
+        tail = [l for l in log.read_bytes()[-4000:].decode(errors='replace').replace('\r', '\n').splitlines() if l.strip()]
+        if tail:
+            line += f"\n{'':<16}> {tail[-1].strip()[:90]}"
+    return line
 
 
 def fmt(s):

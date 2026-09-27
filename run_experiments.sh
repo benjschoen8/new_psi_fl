@@ -73,6 +73,10 @@ run() {  # run <name> <rounds> <workers> [cli flags...]
 
 pair() {  # run two runs at once: pair "<run args>" "<run args>"
     eval "run $1" & local a=$!
+    # the second starts once the first has loaded the data (args.json written), so datasets are
+    # downloaded and splits written by one process only
+    local first=$OUT/${1%% *}
+    while kill -0 $a 2>/dev/null && [[ ! -f $first/args.json && ! -f $first/DONE ]]; do sleep 5; done
     eval "run $2" & local b=$!
     wait $a; local sa=$?
     wait $b; local sb=$?
