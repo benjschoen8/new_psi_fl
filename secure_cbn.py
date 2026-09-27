@@ -97,26 +97,45 @@ def row_spec(g):
     return [(k, (sd[k].shape[1],), np.float32) for k in sorted(sd) if _is_row(k)]
 
 
-def encode_update(grads, U, it, ir, sc_t, sc_r, rng, fixed=False):
+def encode_update(grads, U, it, ir, sc_t, sc_r, rng, fixed=False, blocks=None):
     """grads {'T': trunk update, k: row-k update} (missing = zeros) -> uint64 vector:
-    [trunk[it] | row 0[ir] | ... | row U-1[ir] | counts (trunk, rows)].
-    fixed=False: clipped 8-bit stochastic rounding, mod 2^16. fixed=True: 2^-24 fixed point, mod 2^64."""
+    [trunk[it] | row 0[ir] | ... | row U-1[ir] | counts (trunk, rows) | clip fractions].
+    fixed=False: clipped 8-bit stochastic rounding, mod 2^16. fixed=True: 2^-24 fixed point, mod 2^64.
+    blocks (tb, rb, nt, nr): tensor-block id of every uploaded trunk / row coordinate; then the client
+    also reports, per block, the fraction of its values that exceeded the scale (0..127, adaptive
+    clipping feedback: the Aggregator sees only the sum over clients)."""
     kt, kr = it.size, ir.size
-    v = np.zeros(kt + U * kr + U + 1, np.int64)
+    extra = 0 if blocks is None or fixed else blocks[2] + blocks[3]
+    base = kt + U * kr + U + 1
+    v = np.zeros(base + extra, np.int64)
     q = ((lambda g, c: np.round(np.clip(g, -CLIP, CLIP) * (1 << FRAC_BITS)).astype(np.int64)) if fixed
          else (lambda g, c: compress.quantize(g, c, rng)))
+    if extra:
+        tb, rb, nt, nr = blocks
+        rc, rn = np.zeros(nr), np.zeros(nr)
     for k, g in grads.items():
         if k == 'T':
             v[:kt] = q(g[it], sc_t[it])
             v[kt + U * kr] = 1
+            if extra:
+                over = np.abs(g[it]) > sc_t[it]
+                tot = np.bincount(tb, minlength=nt)
+                v[base:base + nt] = np.round(np.bincount(tb[over], minlength=nt) / np.maximum(tot, 1)
+                                             * compress.LEVELS)
         else:
             v[kt + k * kr:kt + (k + 1) * kr] = q(g[ir], sc_r[k][ir])
             v[kt + U * kr + 1 + k] = 1
+            if extra:
+                rc += np.bincount(rb[np.abs(g[ir]) > sc_r[k][ir]], minlength=nr)
+                rn += np.bincount(rb, minlength=nr)
+    if extra:
+        v[base + nt:] = np.round(rc / np.maximum(rn, 1) * compress.LEVELS)
     return v.view(np.uint64).copy() if fixed else (v % (1 << compress.BITS)).astype(np.uint64)
 
 
-def decode_update(total, U, it, ir, sc_t, sc_r, fixed=False):
-    """SecAgg sum -> (mean trunk update on it or None, {k: mean row-k update on ir}, counts[U+1])."""
+def decode_update(total, U, it, ir, sc_t, sc_r, fixed=False, blocks=None):
+    """SecAgg sum -> (mean trunk update on it or None, {k: mean row-k update on ir}, counts[U+1]);
+    with blocks also (mean clip fraction per trunk block, per row block) over the clients that trained."""
     kt, kr = it.size, ir.size
     if fixed:
         v = np.asarray(total, np.uint64).view(np.int64).astype(np.float64) / (1 << FRAC_BITS)
@@ -128,9 +147,13 @@ def decode_update(total, U, it, ir, sc_t, sc_r, fixed=False):
         n = w[kt + U * kr:]
         t_part = w[:kt] / compress.LEVELS * sc_t[it]
         r_part = [w[kt + k * kr:kt + (k + 1) * kr] / compress.LEVELS * sc_r[k][ir] for k in range(U)]
+    n, clip = n[:U + 1], n[U + 1:]
     t = t_part / n[0] if n[0] else None
     r = {k: r_part[k] / n[k + 1] for k in range(U) if n[k + 1]}
-    return t, r, n
+    if blocks is None or fixed:
+        return t, r, n
+    frac = clip / compress.LEVELS / max(n[0], 1)
+    return t, r, n, (frac[:blocks[2]], frac[blocks[2]:])
 
 
 def plain_mean(results, U, it, ir):
@@ -188,17 +211,44 @@ def plain_union(names, dictionary, ids, samples=None, say=lambda *_: None):
     return dict(index=index, sks=None, pks=None, U=U, metrics=metrics, view=_view(names, index, ids, U), info=info)
 
 
+def fuzzy_union(names, dictionary, ids, keywords, workers=1, samples=None, say=lambda *_: None, fuzzy=None,
+                secure=True):
+    """No dictionary: keywords = per client {label: its own keyword, any language}. Each client snaps
+    its keywords to public anchor classes locally (label_union.fuzzy_union), then the exact OPRF
+    union runs on the class ids: same leakage as exact. names are only the ground truth for the
+    experimenter's metrics. secure=False: the same grouping in the clear (Plain-GeFL)."""
+    from label_union import fuzzy_union as fz
+    p = dict(fz.params(), **(fuzzy or {}))
+    domains = _domains(samples, names)
+    say(f"[setup] fuzzy union: {p['anchors']} anchors, merge={p['merge']}, floor={p['floor']}"
+        f"{' + image check' if domains else ''} ...")
+    t = time.perf_counter()
+    keys = fz.local_keys(names, keywords, p, domains)                    # each client, locally
+    local = time.perf_counter() - t
+    index, sks, pks, U, stats = fz.union(keys, workers=workers, secure=secure)
+    info = dict(stats, method='fuzzy-anchor' if secure else 'plain-fuzzy', fuzzy=p, local_seconds=local,
+                seconds=time.perf_counter() - t)
+    metrics = index_metrics(names, index, U, dictionary)
+    say(f"[setup] fuzzy union done in {info['seconds']:.1f}s (local snapping {local:.1f}s): {U} labels; "
+        f"exact={metrics['exact']}")
+    return dict(index=index, sks=sks, pks=pks, U=U, metrics=metrics, view=_view(names, index, ids, U), info=info)
+
+
 # ---------------------------------------------------------------------------- run
 def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_factory, config, dictionary,
         agg='secagg', rounds=3, device='cpu', record=None, devices=None, workers=1, checkpoint_dir=None,
         save_every=1, keep_all=False, resume=None, seed=0, progress=False, on_resume=None, domain_check=True,
         samples_per_label=16, union_result=None, quantize=True, keep_frac=0.1, quant_scale0=0.05,
-        min_holders=2):
+        min_holders=2, warmup_epochs=0, union='exact', keywords=None, fuzzy=None):
     """gen_factory(num_rows) -> CBN generator; disc_factory(k) -> local D over k labels.
     agg: 'secagg' (the protocol) or 'plain' (Plain-GeFL, no cryptography).
     union_result: reuse a cbn_union() output (the OPRF indices are random per run).
     quantize / keep_frac / quant_scale0: compressed upload (secagg only).
-    min_holders: a row is updated only if at least this many clients contributed this round."""
+    min_holders: a row is updated only if at least this many clients contributed this round.
+    warmup_epochs: before round 1 every client trains its own generator (trunk + its rows) locally for
+    this many epochs, nothing uploaded; round 1's update then carries the warm-up progress.
+    union: 'exact' (names, OPRF) or 'fuzzy' (no dictionary: keywords = per client {label: keyword}
+    in the client's own words, snapped to public anchor classes; fuzzy overrides params)."""
     if agg not in ('plain', 'secagg'):
         raise ValueError('agg must be plain or secagg')
     quant = agg == 'secagg' and quantize
@@ -211,12 +261,16 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
     say = tqdm.write if progress else (lambda *_: None)
     manifest = dict(ids=ids, names=_digest(names), data=[len(c.train_loader.dataset) for c in clients],
                     agg=agg, quantize=quant, keep_frac=keep_frac if quant else 1.0, quant_scale0=quant_scale0,
-                    min_holders=min_holders, seed=seed, config=_digest(config), domain_check=domain_check)
+                    min_holders=min_holders, seed=seed, config=_digest(config), domain_check=domain_check,
+                    warmup_epochs=warmup_epochs, clip_feedback=quant, union=union,
+                    fuzzy=_digest([keywords, fuzzy]) if union == 'fuzzy' else None)
 
     ck = cs = ev_state = None
     if resume:
         ck = _load(resume)
-        diff = sorted(k for k in manifest if ck['manifest'].get(k) != manifest[k])
+        old = {'warmup_epochs': 0, 'clip_feedback': False, 'union': 'exact', 'fuzzy': None,
+               **ck['manifest']}                                          # older checkpoints
+        diff = sorted(k for k in manifest if old.get(k) != manifest[k])
         if diff:
             raise ValueError(f'checkpoint does not match this experiment: {diff} differ')
         base = Path(resume).parent
@@ -224,12 +278,18 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         ev_state = _load(base / 'evaluator' / 'union.pt', CHECKPOINT_FORMAT + '/evaluator')
         if cs['round'] != ck['round']:
             raise ValueError('client state and Aggregator state are from different rounds')
-        Un = dict(cs['union'], U=ck['U'], pks=ck['pks'], info=ck['union_info'], **ev_state['union'])
+        Un = dict(cs['union'], U=ck['U'], pks=ck['pks'], info=ck['union_info'],
+                  **ev_state['union'])
     else:
         samples = ([label_samples(c.train_loader, n, samples_per_label) for c, n in zip(clients, names)]
                    if domain_check and union_result is None else None)
-        Un = union_result or (cbn_union(names, dictionary, ids, workers, samples, say) if agg == 'secagg'
-                              else plain_union(names, dictionary, ids, samples, say))
+        if union_result is not None:
+            Un = union_result
+        elif union == 'fuzzy':
+            Un = fuzzy_union(names, dictionary, ids, keywords, workers, samples, say, fuzzy, agg == 'secagg')
+        else:
+            Un = (cbn_union(names, dictionary, ids, workers, samples, say) if agg == 'secagg'
+                  else plain_union(names, dictionary, ids, samples, say))
         if agg == 'secagg' and Un['pks'] is None:
             raise ValueError('secagg needs an OPRF union with keys (union_result from cbn_union)')
     U, index = Un['U'], Un['index']
@@ -263,15 +323,20 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         if hasattr(shuffle, 'generator'):
             shuffle.generator = torch.Generator().manual_seed(seed * 100003 + k_ + 1)
         local[c.id] = dict(gan=gan, loader=c.train_loader, shuffle=shuffle, rows=labels,
-                           sk=None if Un['sks'] is None else {i: Un['sks'][k_][x] for i, x in zip(labels, names[k_])})
+                           slots=[index[k_][x] for x in names[k_]],
+                           sk=None if Un['sks'] is None else {index[k_][x]: Un['sks'][k_][x] for x in names[k_]})
 
-    sc_t = compress.initial_scales(spec, trunk, quant_scale0)             # public, per tensor
+    blk = lambda sp: np.concatenate([np.full(int(np.prod(sh)), i) for i, (_, sh, _) in enumerate(sp)])
+    bt, br = blk(spec), blk(rspec)                                        # tensor-block id per coordinate
+    sc_t = compress.initial_scales(spec, trunk, quant_scale0)             # public, per tensor block
     sc_r = np.stack([compress.initial_scales(rspec, table[k], quant_scale0) for k in range(U)])
+    mult_t = np.bincount(bt, sc_t) / np.bincount(bt)                      # block scales (clip feedback)
+    mult_r = np.bincount(br, sc_r.max(0)) / np.bincount(br)
     qrng = np.random.default_rng(seed)                                    # clients' rounding coins (simulated)
     trainer, history, start = GlobalClassifierTrainer(classifier_factory, config, device), [], 0
     if ck:
         trunk, table, history, start = ck['trunk'], ck['table'], ck['history'], ck['round']
-        sc_t, sc_r = ck['scales']
+        sc_t, sc_r, mult_t, mult_r = ck['scales']
         qrng.bit_generator.state = cs['qrng']
         if on_resume:
             on_resume(start)
@@ -279,7 +344,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             local[cid]['gan'].load_state_dict(st)
             if st.get('shuffle') is not None:
                 local[cid]['shuffle'].generator.set_state(st['shuffle'])
-        if ck['trainer'] is not None:
+        if ck.get('trainer') is not None:
             trainer.model = trainer.factory(U).to(device)
             trainer.model.load_state_dict(ck['trainer']['model'])
             trainer.optimizer = getattr(torch.optim, config.get('global_model_optim', 'Adam'))(
@@ -296,11 +361,65 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         if not counts:
             return c.id, None
         dt, dr = v['gan'].update()
-        return c.id, ({'T': dt, **{v['rows'][a]: dr[a] for a in counts}},)
+        g, cnt = {'T': dt}, {}
+        for a in counts:                                                  # two own labels in one fuzzy
+            r_ = v['rows'][a]                                             # group: average their rows
+            g[r_], cnt[r_] = g.get(r_, 0) + dr[a], cnt.get(r_, 0) + 1
+        return c.id, ({k: (x / cnt[k] if k in cnt else x) for k, x in g.items()},)
+
+    def save_checkpoint(done, warmed=False):
+        d = Path(checkpoint_dir)
+        cfile = f'clients/round_{done:04d}.pt'
+        _save(d / cfile, dict(                                            # 1. clients' private state
+            format=CHECKPOINT_FORMAT + '/clients', round=done, qrng=qrng.bit_generator.state,
+            union=dict(index=Un['index'], sks=Un['sks']),
+            clients={cid: dict(v['gan'].state_dict(), shuffle=getattr(getattr(v['shuffle'], 'generator', None),
+                                                                       'get_state', lambda: None)())
+                     for cid, v in local.items()}))
+        agg_state = dict(format=CHECKPOINT_FORMAT, round=done, manifest=manifest, clients_file=cfile,
+                         trunk=trunk, table=table, U=U, pks=Un['pks'], union_info=Un['info'],
+                         scales=(sc_t, sc_r, mult_t, mult_r), history=history, rng=_rng_state(), warmed=warmed or done > 0,
+                         trainer=None if trainer.model is None else dict(
+                             model=trainer.model.state_dict(), optimizer=trainer.optimizer.state_dict(),
+                             mapping=trainer._mapping))
+        _save(d / 'checkpoint_last.pt', agg_state)                        # 2. then the Aggregator's
+        if keep_all and done:
+            _save(d / f'round_{done:04d}.pt', agg_state)
+        elif not keep_all:
+            for old_file in (d / 'clients').glob('round_*.pt'):           # 3. drop superseded client files
+                if old_file.name != Path(cfile).name:
+                    old_file.unlink()
+
+    n_cl = len(clients)
+    if warmup_epochs and start == 0 and not (ck and ck.get('warmed')):  # local generator warm-up
+        t = time.perf_counter()
+
+        def warm(c):
+            gan = local[c.id]['gan']
+            epochs, gan.epochs = gan.epochs, warmup_epochs
+            try:
+                gan.train(local[c.id]['loader'])
+            finally:
+                gan.epochs = epochs
+            return c.id
+
+        print(f'[warm-up] {n_cl} clients x {warmup_epochs} local epochs ...', flush=True)
+        if workers > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(workers) as pool:
+                for k_, f in enumerate(as_completed([pool.submit(warm, c) for c in clients]), 1):
+                    f.result()
+                    print(f'[warm-up] {k_}/{n_cl} clients done', flush=True)
+        else:
+            for k_, c in enumerate(clients, 1):
+                warm(c)
+                print(f'[warm-up] {k_}/{n_cl} clients done', flush=True)
+        setup['warmup_seconds'] = time.perf_counter() - t
+        if checkpoint_dir:
+            save_checkpoint(0, warmed=True)                               # a crash in round 1 keeps it
 
     bb = BulletinBoard()
     model = trainer.model
-    n_cl = len(clients)
     bar = tqdm(range(start, rounds), desc='rounds', unit='round', initial=start, total=rounds, disable=not progress)
     for r in bar:
         row = dict(round=r + 1, seconds={}, bytes=dict(download_per_client=0.))
@@ -311,14 +430,14 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             bb.post('aggregator', f'trunk/{r}', hashlib.sha256(blob).digest())
             if agg == 'secagg':
                 board = BulletinBoard()                                   # this round's KEM posts only
-                kem.post_generators(board, Un['pks'], r, {k: {'row': table[k]} for k in range(U)})
+                kem.post_generators(board, Un['pks'], r, {g: {'row': table[g]} for g in range(U)})
                 board_bytes = sum(len(e.payload) for e in board.read())
                 row['bytes']['broadcast'] = len(blob) + board_bytes       # one copy
                 row['bytes']['download_per_client'] = float(len(blob) + board_bytes)   # everyone reads all
                 for c in clients:
                     got = kem.fetch_generators(board, local[c.id]['sk'], Un['pks'], r)
                     local[c.id]['gan'].load_global(unflatten(trunk, spec),
-                                                   np.stack([got[i]['row'] for i in local[c.id]['rows']]))
+                                                   np.stack([got[s]['row'] for s in local[c.id]['slots']]))
             else:
                 row['bytes']['broadcast'] = len(blob) + table.astype(np.float32).nbytes
                 row['bytes']['download_per_client'] = float(len(blob) + np.mean(
@@ -353,27 +472,35 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             row['bytes'].update(upload=int(sum(up)), upload_payload_per_client=float(np.mean(up)),
                                 upload_per_client=float(np.mean(up)))
         else:
-            vectors = {cid: encode_update(u[0] if u else {}, U, it, ir, sc_t, sc_r, qrng, fixed=not quant)
+            if quant:                                                     # diagnostic: share of clipped values
+                over = [(np.abs(g[it]) > sc_t[it]) if k == 'T' else (np.abs(g[ir]) > sc_r[k][ir])
+                        for _, u in results if u for k, g in u[0].items()]
+                row['clipped'] = float(np.concatenate(over).mean()) if over else 0.
+            blocks = (bt[it], br[ir], len(spec), len(rspec)) if quant else None
+            vectors = {cid: encode_update(u[0] if u else {}, U, it, ir, sc_t, sc_r, qrng, not quant, blocks)
                        for cid, u in results}                             # everyone uploads
             sa = {}
             total, _ = run_secagg(vectors, threshold=max(2, -(-2 * n_cl // 3)),
                                   modulus_bits=compress.BITS if quant else 64,
                                   session=f'cbn-round-{r}'.encode(), workers=workers, stats=sa)
-            mt, mr, n = decode_update(total, U, it, ir, sc_t, sc_r, fixed=not quant)
+            out = decode_update(total, U, it, ir, sc_t, sc_r, not quant, blocks)
+            mt, mr, n = out[:3]
+            if quant:                                                     # adaptive clipping: each block's
+                ct, cr = out[3]                                           # scale follows its clip rate
+                step = lambda c: np.where(c > .1, 4., np.where(c > .01, 2., np.where(c < .001, .9, 1.)))
+                mult_t, mult_r = mult_t * step(ct), mult_r * step(cr)
+                sc_t, sc_r = mult_t[bt], np.tile(mult_r[br], (U, 1))
+                row['clip_feedback'] = dict(trunk_max=float(ct.max()), rows_max=float(cr.max()))
             row['bytes'].update(upload=int(sa['payload_up']), upload_payload_per_client=sa['payload_up'] / n_cl,
                                 upload_per_client=(sa['payload_up'] + sa['control_up']) / n_cl)
             row['bytes']['download_per_client'] += sa['control_down'] / n_cl
         trunk, table = trunk.copy(), table.copy()
         if mt is not None and n[0] >= min_holders:
             trunk[it] -= mt                                               # update = -(local - global)
-            d = np.zeros(trunk.size); d[it] = -mt
-            sc_t = compress.next_scales(spec, d, it)
         trunk[var_mask] = np.maximum(trunk[var_mask], 1e-5)               # BN variance stays valid
         for k, m in mr.items():
             if n[k + 1] >= min_holders:
                 table[k, ir] -= m
-                d = np.zeros(P); d[ir] = -m
-                sc_r[k] = compress.next_scales(rspec, d, ir)
         row['rows_updated'] = int(sum(n[1:] >= min_holders))
         row['rows_below_threshold'] = int(sum((n[1:] > 0) & (n[1:] < min_holders)))
         if not (np.isfinite(trunk).all() and np.isfinite(table).all()):
@@ -397,26 +524,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             record(row)
         if checkpoint_dir and ((r + 1) % save_every == 0 or r + 1 == rounds):
             t = time.perf_counter()
-            d = Path(checkpoint_dir)
-            cfile = f'clients/round_{r + 1:04d}.pt'
-            _save(d / cfile, dict(                                        # 1. clients' private state
-                format=CHECKPOINT_FORMAT + '/clients', round=r + 1, qrng=qrng.bit_generator.state,
-                union=dict(index=Un['index'], sks=Un['sks']),
-                clients={cid: dict(v['gan'].state_dict(), shuffle=getattr(getattr(v['shuffle'], 'generator', None),
-                                                                           'get_state', lambda: None)())
-                         for cid, v in local.items()}))
-            agg_state = dict(format=CHECKPOINT_FORMAT, round=r + 1, manifest=manifest, clients_file=cfile,
-                             trunk=trunk, table=table, U=U, pks=Un['pks'], union_info=Un['info'],
-                             scales=(sc_t, sc_r), history=history, rng=_rng_state(),
-                             trainer=dict(model=model.state_dict(), optimizer=trainer.optimizer.state_dict(),
-                                          mapping=trainer._mapping))
-            _save(d / 'checkpoint_last.pt', agg_state)                    # 2. then the Aggregator's
-            if keep_all:
-                _save(d / f'round_{r + 1:04d}.pt', agg_state)
-            else:
-                for old in (d / 'clients').glob('round_*.pt'):            # 3. drop superseded client files
-                    if old.name != Path(cfile).name:
-                        old.unlink()
+            save_checkpoint(r + 1)
             row['seconds']['checkpoint'] = time.perf_counter() - t
     bar.close()
     setup.update(trunk_params=int(trunk.size), row_params=int(P), resumed_from=start)

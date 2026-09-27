@@ -398,10 +398,14 @@ def main():
                         'holders get them (secure_cbn, needs --union oprf); code: fixed public label codes')
     p.add_argument('--no-domain-check', action='store_true', help='oprf union: names only, no image check')
     p.add_argument('--samples-per-label', type=int, default=16, help='images per label for the domain check')
-    p.add_argument('--union', choices=('oprf', 'mpc', 'secagg'), default='oprf',
-                   help='label union: oprf = PSI-style n-party OPRF tags + SecAgg, no dictionary (default); '
-                        'mpc = clients-only MPC over the dictionary; both give the Aggregator only the index '
-                        'list. secagg = indicator vectors (Aggregator also learns names and holder counts)')
+    p.add_argument('--union', choices=('oprf', 'fuzzy', 'mpc', 'secagg'), default='oprf',
+                   help='label union: oprf = PSI-style n-party OPRF tags + SecAgg on the label names (default); '
+                        'fuzzy = no shared names: every client names its labels with its own keyword in its own language '
+                        '(--fuzzy-langs), snapped locally to public anchor classes by a cross-lingual encoder, then exact union (label_union.fuzzy_union; '
+                        'parameters from tests/fuzzy_threshold.py); mpc = clients-only MPC over the dictionary; '
+                        'secagg = indicator vectors (Aggregator also learns names and holder counts)')
+    p.add_argument('--fuzzy-langs', default='en,zh,es,ja,fr,de',
+                   help='--union fuzzy: client i writes its label keywords in language i mod len (rt_descriptions.keyword)')
     p.add_argument('--code-dim', type=int, default=128)
     p.add_argument('--dictionary', type=Path, help='public dictionary: one canonical label id per line')
     p.add_argument('--devices', help='comma list, e.g. cuda:0,cuda:1 or mps,cpu; clients are spread round-robin')
@@ -414,6 +418,8 @@ def main():
                    help='laptop test: 1 local GAN epoch, 1 classifier epoch, 32 samples/class, 3 rounds '
                         '(--rounds overrides), each client capped at --fast-samples train/test images')
     p.add_argument('--no-quantize', action='store_true', help='cbn + secagg: 64-bit fixed point, no compression')
+    p.add_argument('--warmup-epochs', type=int, default=0,
+                   help='cbn: local generator epochs per client before round 1 (nothing uploaded)')
     p.add_argument('--min-holders', type=int, default=2,
                    help='cbn: a label row is updated only if at least this many clients contributed')
     p.add_argument('--keep-frac', type=float, default=0.1, help='cbn + secagg: coordinates uploaded per round')
@@ -457,8 +463,17 @@ def main():
         if args.gen == 'cbn':
             from secfl.cbn_gan import CBNGenerator
             gen_f = lambda k: CBNGenerator(k, nd)
-    if args.gen == 'cbn' and args.union != 'oprf':
-        raise SystemExit('--gen cbn needs --union oprf (the KEM keys come from the OPRF tags)')
+    if args.gen == 'cbn' and args.union not in ('oprf', 'fuzzy'):
+        raise SystemExit('--gen cbn needs --union oprf or fuzzy (the KEM keys come from the union)')
+    if args.union == 'fuzzy' and args.gen != 'cbn':
+        raise SystemExit('--union fuzzy needs --gen cbn')
+    keywords = None
+    if args.union == 'fuzzy':                                             # each client's own words
+        from rt_descriptions import keyword
+        langs = args.fuzzy_langs.split(',')
+        dataset_of = {cid: name for name, cid, _ in tests}
+        keywords = [{x: keyword(dataset_of.get(c.id, ''), x, langs[j % len(langs)]) for x in spaces[c.id]}
+                    for j, c in enumerate(clients)]
     if args.resume:
         out = args.output or args.resume.parent                            # keep appending to that run
         out.mkdir(parents=True, exist_ok=True)
@@ -490,7 +505,9 @@ def main():
         import secure_cbn
         result = secure_cbn.run(clients, spaces, tests, gen_f, disc_f, cls_f, config, dictionary,
                                 quantize=not args.no_quantize, keep_frac=args.keep_frac,
-                                quant_scale0=args.quant_scale0, min_holders=args.min_holders, **common)
+                                quant_scale0=args.quant_scale0, min_holders=args.min_holders,
+                                warmup_epochs=args.warmup_epochs,
+                                union='fuzzy' if args.union == 'fuzzy' else 'exact', keywords=keywords, **common)
     else:
         result = run(clients, spaces, tests, gen_f, disc_f, cls_f, config, dictionary, code_dim=code_dim,
                      union=args.union, **common)

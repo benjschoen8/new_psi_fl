@@ -118,6 +118,24 @@ class CBNPipelineTests(unittest.TestCase):
             np.testing.assert_array_equal(resumed['table'], full['table'])
             self.assertEqual([h['accuracy'] for h in resumed['history']], [h['accuracy'] for h in full['history']])
 
+    def test_warmup_moves_round_one_and_resumes(self):
+        base, _, _ = go(agg='plain', rounds=1, min_holders=1)
+        warm, _, _ = go(agg='plain', rounds=1, min_holders=1, warmup_epochs=3)
+        self.assertGreater(np.abs(warm['table'] - base['table']).sum(), 0)          # warm-up changed the update
+        self.assertIn('warmup_seconds', warm['setup'])
+        with tempfile.TemporaryDirectory() as d:
+            full, _, _ = go(agg='secagg', rounds=2, warmup_epochs=2)
+            go(agg='secagg', rounds=0, warmup_epochs=2, checkpoint_dir=d, union_result=full['union'])
+            ck = torch.load(f'{d}/checkpoint_last.pt', weights_only=False)
+            self.assertEqual((ck['round'], ck['warmed']), (0, True))                # saved right after warm-up
+            resumed, _, _ = go(agg='secagg', rounds=2, warmup_epochs=2, resume=f'{d}/checkpoint_last.pt',
+                               checkpoint_dir=d)
+            self.assertNotIn('warmup_seconds', resumed['setup'])                  # not warmed twice
+            np.testing.assert_array_equal(resumed['trunk'], full['trunk'])
+            np.testing.assert_array_equal(resumed['table'], full['table'])
+            with self.assertRaisesRegex(ValueError, 'warmup_epochs'):
+                go(agg='secagg', rounds=2, resume=f'{d}/checkpoint_last.pt')        # warm-up setting must match
+
     def test_outputs_are_split_by_role(self):
         with tempfile.TemporaryDirectory() as d:
             go(agg='secagg', rounds=1, checkpoint_dir=d)
@@ -137,6 +155,51 @@ class CBNPipelineTests(unittest.TestCase):
             p.write_text('{"round": 1}\n{"round": 2}\n{"round": 3, "acc')
             trim_log(p, 2)
             self.assertEqual(p.read_text(), '{"round": 1}\n{"round": 2}\n')
+
+
+class CBNFuzzyTests(unittest.TestCase):
+    """No dictionary: each client names its labels in its own language (fake public encoder)."""
+    WORDS = {'cat': ['cat', 'gato', '貓'], 'dog': ['dog', 'perro', '狗'], 'ship': ['ship', 'barco', '船']}
+
+    def setUp(self):
+        from unittest import mock
+        from label_union import encoder, fuzzy_union
+        rng = np.random.default_rng(0)
+        center = {c: rng.standard_normal(32) for c in self.WORDS}
+        unit = lambda v: v / np.linalg.norm(v)
+        vec = {w: unit(center[c] + .05 * rng.standard_normal(32)) for c, ws in self.WORDS.items() for w in ws}
+        A = np.array([unit(center[c] + .05 * rng.standard_normal(32)) for c in self.WORDS for _ in (0, 1)])
+        self.patches = [mock.patch.object(encoder, 'embed', lambda texts, model=None, cache_dir=None:
+                                          np.array([vec[t] for t in texts])),
+                        mock.patch.object(fuzzy_union, 'load_anchors', lambda model, n, merge:
+                                          (A, fuzzy_union.anchor_classes(A, merge)))]   # 2 synonyms per concept
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def fuzzy_go(self, **kw):
+        _, spaces, _ = build_synthetic(CONFIG)
+        keywords = [{x: self.WORDS[x][i % 3] for x in spaces[cid]} for i, cid in enumerate(spaces)]
+        return go(union='fuzzy', keywords=keywords, fuzzy=dict(anchors=6, merge=.8, floor=.3), **kw)
+
+    def test_fuzzy_union_across_languages_trains(self):
+        res, spaces, _ = self.fuzzy_go(agg='secagg', rounds=2, min_holders=1)
+        self.assertEqual(res['union']['U'], 3)                               # cat / gato / 貓 -> one label
+        self.assertTrue(res['evaluator']['union_metrics']['exact'])
+        self.assertEqual(len(res['history']), 2)
+        plain, _, _ = self.fuzzy_go(agg='plain', rounds=1, min_holders=1)   # Plain-GeFL, same grouping
+        self.assertTrue(plain['evaluator']['union_metrics']['exact'])
+
+    def test_fuzzy_resume_is_identical(self):
+        with tempfile.TemporaryDirectory() as d:
+            first, _, _ = self.fuzzy_go(agg='secagg', rounds=1, checkpoint_dir=d, min_holders=1)
+            full, _, _ = self.fuzzy_go(agg='secagg', rounds=2, union_result=first['union'], min_holders=1)
+            resumed, _, _ = self.fuzzy_go(agg='secagg', rounds=2, resume=f'{d}/checkpoint_last.pt',
+                                          checkpoint_dir=d, min_holders=1)
+        np.testing.assert_array_equal(resumed['table'], full['table'])
 
 
 class CBNCompressTests(unittest.TestCase):
@@ -160,6 +223,23 @@ class CBNCompressTests(unittest.TestCase):
             np.testing.assert_allclose(mr[0], (ups[0][0][ir] + ups[1][0][ir]) / 2, atol=.2 * tol)
             np.testing.assert_allclose(mr[2], ups[1][2][ir], atol=.2 * tol)
 
+    def test_clip_feedback_reports_mean_clip_fraction(self):
+        from secfl.secagg import run_secagg
+        from secfl import compress
+        rng = np.random.default_rng(0)
+        U, T, P = 2, 8, 4
+        it, ir = np.arange(T), np.arange(P)
+        sc_t, sc_r = np.full(T, .1), np.full((U, P), .1)
+        blocks = (np.array([0] * 4 + [1] * 4), np.array([0, 0, 1, 1]), 2, 2)
+        ups = {0: {'T': np.array([.5] * 4 + [0.] * 4), 0: np.array([.5, 0, 0, 0])},     # block 0 all clipped
+               1: {'T': np.zeros(T), 1: np.zeros(P)}, 2: {}}
+        vec = {c: secure_cbn.encode_update(u, U, it, ir, sc_t, sc_r, rng, False, blocks) for c, u in ups.items()}
+        total, _ = run_secagg(vec, threshold=2, modulus_bits=compress.BITS, session=b'c')
+        mt, mr, n, (ct, cr) = secure_cbn.decode_update(total, U, it, ir, sc_t, sc_r, False, blocks)
+        self.assertEqual(n.tolist(), [2, 1, 1])                               # counts unaffected
+        np.testing.assert_allclose(ct, [.5, 0], atol=.01)                     # mean over the 2 trainers
+        np.testing.assert_allclose(cr, [.25, 0], atol=.01)
+
     def test_quantized_pipeline_bytes_and_kept_coordinates(self):
         from secfl import compress
         q, _, _ = go(agg='secagg', rounds=1, keep_frac=.5, min_holders=1)
@@ -168,7 +248,9 @@ class CBNCompressTests(unittest.TestCase):
         U, T, P = R0.shape[0], T0.size, R0.shape[1]
         kt, kr = round(T * .5), round(P * .5)
         b = q['history'][0]['bytes']
-        self.assertEqual(b['upload'], 3 * (kt + U * kr + U + 1) * 2)         # 3 clients, 16 bit payload
+        g0 = secure_cbn.seeded(lambda k: TinyCBNGenerator(k, 4, 2))(U)
+        nb = len(secure_cbn.flatten(trunk_state(g0))[1]) + len(secure_cbn.row_spec(g0))   # clip-feedback words
+        self.assertEqual(b['upload'], 3 * (kt + U * kr + U + 1 + nb) * 2)    # 3 clients, 16 bit payload
         self.assertGreater(b['upload_per_client'], b['upload_payload_per_client'])   # + SecAgg control
         it = compress.keep_index(T, .5, 0, b'cbn-trunk')
         rest = np.setdiff1d(np.arange(T), it)

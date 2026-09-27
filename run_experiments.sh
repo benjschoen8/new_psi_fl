@@ -26,6 +26,7 @@ WORKERS=${WORKERS:-8}              # per run in phases 1 and 3 (two runs share t
 TIME_WORKERS=${TIME_WORKERS:-16}   # phase 2 runs alone
 ROUNDS=${ROUNDS:-45}
 ABL_ROUNDS=${ABL_ROUNDS:-$ROUNDS}  # ablations only need the trend, e.g. ABL_ROUNDS=15
+WARMUP=${WARMUP:-0}                # local generator epochs per client before round 1 (every run)
 TIME_ROUNDS=${TIME_ROUNDS:-3}
 ABLATIONS=${ABLATIONS:-0}
 RETRIES=${RETRIES:-3}
@@ -65,7 +66,9 @@ run() {  # run <name> <rounds> <workers> [cli flags...]
         # shellcheck disable=SC2086
         local gpu=()
         [[ -n ${RUN_GPU:-} ]] && gpu=(env "CUDA_VISIBLE_DEVICES=$RUN_GPU")
-        if "${gpu[@]}" $PY -m secure_code_no_cluster "$@" $EXTRA --rounds "$rounds" --device "$DEVICE" --workers "$workers" \
+        local warm=()
+        (( WARMUP > 0 )) && warm=(--warmup-epochs "$WARMUP")
+        if "${gpu[@]}" $PY -m secure_code_no_cluster "$@" "${warm[@]}" $EXTRA --rounds "$rounds" --device "$DEVICE" --workers "$workers" \
                --no-progress --output "$dir" "${resume[@]}" >> "$log" 2>&1; then
             touch "$dir/DONE"
             say "done  $name in $(( (SECONDS - t0) / 60 )) min"
