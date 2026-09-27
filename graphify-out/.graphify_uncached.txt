@@ -1,0 +1,8 @@
+/Users/schoen/Downloads/new_psi_fl/.agents/rules/graphify.md
+/Users/schoen/Downloads/new_psi_fl/.agents/workflows/graphify.md
+/Users/schoen/Downloads/new_psi_fl/PLAN.md
+/Users/schoen/Downloads/new_psi_fl/README.md
+/Users/schoen/Downloads/new_psi_fl/TRACE_REPORT.md
+/Users/schoen/Downloads/new_psi_fl/VALIDATION.md
+/Users/schoen/Downloads/new_psi_fl/config.yaml
+/Users/schoen/Downloads/new_psi_fl/requirements.txt

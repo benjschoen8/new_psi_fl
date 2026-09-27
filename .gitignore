@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+venv/
+
+# Datasets & cache
+data/raw/
+data/cache/
+*.zip
+*.tar
+*.tar.gz
+# *.pdf
+*.png
+
+# Checkpoints & logs
+checkpoints/
+runs/
+logs/
+logs_temp/
+result/
+saved_models/
+*.pt
+*.pth
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+legacy/

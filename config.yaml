@@ -1,0 +1,30 @@
+# Baseline values from configs/het-iid-exp.yaml; data partition alpha is explicit.
+heterogeneous: true
+dirichlet_alpha: 0.1
+global_rounds: 45
+start_mapping_epoch: 25
+sample_frac: 1.0
+local_epochs: 1
+local_optim: Adam
+local_lr: 0.001
+batch_size: 64
+global_feature_dim: 256
+aid_by_gen: false
+gen_local_epochs: 5
+gen_noise_dim: 128
+gen_lr: 0.0002
+gan_beta1: 0.5
+gan_beta2: 0.999
+channels: 3
+img_size: 32
+global_model_epochs: 5
+global_model_optim: Adam
+global_model_optim_lr: 0.001
+global_samples_per_class: 64
+entropy_ratio: 0.25
+use_new_entropy_method: true
+# PSI mappings: owner description languages (cycled over groups), rt_protocol method/backend
+rt_langs: [en]
+rt_method: filter
+rt_psi: plain
+rt_samples: 32
