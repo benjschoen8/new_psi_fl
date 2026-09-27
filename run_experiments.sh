@@ -12,6 +12,9 @@
 #
 # A finished run gets a DONE file and is skipped next time; an unfinished one resumes from its
 # checkpoint; a failing one is retried RETRIES times. Logs: $OUT/logs/<run>.log, progress: $OUT/progress.log
+# PHASES="2 3 4" runs only those phases (e.g. split the work between two machines; copy the finished
+# run folders into one $OUT before the final figures). GPUS="0 1": the two runs of a pair each get their
+# own GPU, single runs use the first (unset: every run uses DEVICE).
 # In a terminal the screen shows live progress bars + ETA per run (tests/progress.py), refreshed every
 # REFRESH seconds; MONITOR=0 turns that off (plain event lines instead), MONITOR=1 forces it on.
 set -uo pipefail
@@ -22,11 +25,14 @@ DEVICE=${DEVICE:-cuda}
 WORKERS=${WORKERS:-8}              # per run in phases 1 and 3 (two runs share the machine)
 TIME_WORKERS=${TIME_WORKERS:-16}   # phase 2 runs alone
 ROUNDS=${ROUNDS:-45}
+ABL_ROUNDS=${ABL_ROUNDS:-$ROUNDS}  # ablations only need the trend, e.g. ABL_ROUNDS=15
 TIME_ROUNDS=${TIME_ROUNDS:-3}
 ABLATIONS=${ABLATIONS:-0}
 RETRIES=${RETRIES:-3}
 OUT=${OUT:-runs/paper}
 EXTRA=${EXTRA:-}                   # extra CLI flags for every run, e.g. EXTRA="--smoke" for a dry run
+PHASES=${PHASES:-1 2 3 4}
+read -r -a GPU_LIST <<< "${GPUS:-}"
 MONITOR=${MONITOR:-auto}
 REFRESH=${REFRESH:-30}
 
@@ -57,7 +63,9 @@ run() {  # run <name> <rounds> <workers> [cli flags...]
         say "start $name (try $try${resume[0]:+, resuming})"
         local t0=$SECONDS
         # shellcheck disable=SC2086
-        if $PY -m secure_code_no_cluster "$@" $EXTRA --rounds "$rounds" --device "$DEVICE" --workers "$workers" \
+        local gpu=()
+        [[ -n ${RUN_GPU:-} ]] && gpu=(env "CUDA_VISIBLE_DEVICES=$RUN_GPU")
+        if "${gpu[@]}" $PY -m secure_code_no_cluster "$@" $EXTRA --rounds "$rounds" --device "$DEVICE" --workers "$workers" \
                --no-progress --output "$dir" "${resume[@]}" >> "$log" 2>&1; then
             touch "$dir/DONE"
             say "done  $name in $(( (SECONDS - t0) / 60 )) min"
@@ -72,32 +80,40 @@ run() {  # run <name> <rounds> <workers> [cli flags...]
 }
 
 pair() {  # run two runs at once: pair "<run args>" "<run args>"
-    eval "run $1" & local a=$!
+    local g1=${GPU_LIST[0]:-} g2=${GPU_LIST[1]:-${GPU_LIST[0]:-}}
+    RUN_GPU=$g1 eval "run $1" & local a=$!
     # the second starts once the first has loaded the data (args.json written), so datasets are
     # downloaded and splits written by one process only
     local first=$OUT/${1%% *}
     while kill -0 $a 2>/dev/null && [[ ! -f $first/args.json && ! -f $first/DONE ]]; do sleep 5; done
-    eval "run $2" & local b=$!
+    RUN_GPU=$g2 eval "run $2" & local b=$!
     wait $a; local sa=$?
     wait $b; local sb=$?
     return $(( sa || sb ))
 }
 
 fails=0
+has() { [[ " $PHASES " == *" $1 "* ]]; }
+RUN_GPU=${GPU_LIST[0]:-}                                   # single runs: first GPU
+if has 1; then
 say "phase 1: accuracy ($ROUNDS rounds, plain + ours in parallel)"
 pair "plain $ROUNDS $WORKERS --agg plain" "ours $ROUNDS $WORKERS" || fails=1
+fi
 
+if has 2; then
 say "phase 2: cost ($TIME_ROUNDS rounds each, one at a time)"
 run time_plain    "$TIME_ROUNDS" "$TIME_WORKERS" --agg plain   || fails=1
 run time_ours_noq "$TIME_ROUNDS" "$TIME_WORKERS" --no-quantize || fails=1
 run time_ours     "$TIME_ROUNDS" "$TIME_WORKERS"               || fails=1
-
-if [[ $ABLATIONS == 1 ]]; then
-    say "phase 3: ablations ($ROUNDS rounds, two at a time)"
-    pair "ours_t1 $ROUNDS $WORKERS --min-holders 1" "ours_k0.5 $ROUNDS $WORKERS --keep-frac 0.5" || fails=1
-    pair "ours_k0.2 $ROUNDS $WORKERS --keep-frac 0.2" "ours_k0.05 $ROUNDS $WORKERS --keep-frac 0.05" || fails=1
 fi
 
+if [[ $ABLATIONS == 1 ]] && has 3; then
+    say "phase 3: ablations ($ABL_ROUNDS rounds, two at a time)"
+    pair "ours_t1 $ABL_ROUNDS $WORKERS --min-holders 1" "ours_k0.5 $ABL_ROUNDS $WORKERS --keep-frac 0.5" || fails=1
+    pair "ours_k0.2 $ABL_ROUNDS $WORKERS --keep-frac 0.2" "ours_k0.05 $ABL_ROUNDS $WORKERS --keep-frac 0.05" || fails=1
+fi
+
+if has 4; then
 say "phase 4: figures"
 plot() {  # plot <out name> <run:label>...
     local name=$1; shift
@@ -137,6 +153,8 @@ for d in sorted(p for p in out.iterdir() if (p / 'metrics.jsonl').exists()):
     print(f"{d.name:<16}{rows[-1]['round']:>7}{rows[-1]['accuracy']:>11.4f}{max(r['accuracy'] for r in rows):>10.4f}"
           f"{up / 1e3:>12.1f} kB{sec:>9.0f}")
 EOF
+
+fi
 
 if (( fails )); then say "finished WITH FAILURES: see $OUT/progress.log, rerun this script to retry"; exit 1; fi
 say "all done"
