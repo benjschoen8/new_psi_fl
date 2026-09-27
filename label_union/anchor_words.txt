@@ -96,8 +96,6 @@ go
 well
 said
 way
-1
-2
 most
 much
 very
@@ -123,7 +121,6 @@ why
 made
 still
 take
-3
 got
 many
 never
@@ -150,7 +147,6 @@ same
 used
 both
 every
-4
 am
 come
 part
@@ -161,7 +157,6 @@ between
 always
 better
 find
-5
 help
 high
 little
@@ -218,7 +213,6 @@ doing
 few
 let
 real
-6
 called
 different
 having
@@ -240,7 +234,6 @@ start
 system
 times
 week
-7
 already
 anything
 case
@@ -298,7 +291,6 @@ party
 run
 says
 service
-8
 country
 open
 season
@@ -350,7 +342,6 @@ ago
 others
 social
 talk
-9
 court
 fact
 given
@@ -571,7 +562,6 @@ space
 summer
 term
 wife
-0
 america
 beautiful
 date
@@ -1492,7 +1482,6 @@ traditional
 twice
 wind
 worry
-1st
 americans
 appeared
 becomes
@@ -1786,7 +1775,6 @@ violence
 weapons
 yours
 youth
-2nd
 appreciate
 bigger
 breaking
@@ -2161,7 +2149,6 @@ studio
 sub
 weak
 youtube
-3rd
 actor
 advance
 apartment
@@ -2620,7 +2607,6 @@ turkey
 ve
 victim
 victims
-4th
 agents
 amazon
 arrest
@@ -3100,7 +3086,6 @@ technique
 thin
 tied
 z
-3d
 accused
 adventure
 argue
@@ -3354,7 +3339,6 @@ welfare
 winners
 wire
 worker
-5th
 afterwards
 alright
 android
@@ -4147,7 +4131,6 @@ unlikely
 updates
 vietnam
 viewed
-6th
 affair
 agenda
 bat
@@ -4357,7 +4340,6 @@ threats
 tourism
 turkish
 volunteer
-7th
 acceptable
 allies
 attempting
@@ -4574,7 +4556,6 @@ wages
 wells
 wheels
 ye
-8th
 abc
 abortion
 accuracy
@@ -5467,7 +5448,6 @@ wallet
 welsh
 workshop
 wrapped
-9th
 aboard
 abstract
 accent
@@ -7907,7 +7887,6 @@ pioneer
 prescribed
 pressures
 prosperity
-ps4
 recreational
 reds
 refuge
@@ -8130,7 +8109,6 @@ embedded
 emerge
 excluded
 expects
-f1
 farewell
 feeds
 fist
@@ -8446,7 +8424,6 @@ wee
 woo
 xd
 zip
-a00
 abs
 abundance
 advancing
@@ -8698,7 +8675,6 @@ volleyball
 walsh
 wires
 yell
-2d
 advertisement
 analysts
 analyze
@@ -9103,7 +9079,6 @@ willingness
 woody
 worthless
 yacht
-a000
 aberdeen
 absorb
 accompany
@@ -9291,7 +9266,6 @@ ironic
 lacked
 lin
 luggage
-m00
 maggie
 marion
 mel
@@ -9654,7 +9628,6 @@ chatting
 chop
 circuits
 clifford
-co2
 cody
 coleman
 commanded
@@ -10079,7 +10052,6 @@ successes
 summers
 sundays
 supplying
-t00
 telescope
 temp
 tended
@@ -10899,7 +10871,6 @@ whipped
 wrath
 yuan
 zen
-4k
 abuses
 accomplishment
 acquisitions
@@ -11060,7 +11031,6 @@ watt
 weighs
 willis
 willow
-x00
 addict
 ale
 api
@@ -11704,7 +11674,6 @@ wickets
 withstand
 woodland
 zinc
-a1
 accustomed
 adequately
 ahmad
@@ -11727,7 +11696,6 @@ births
 breakup
 brew
 bulldogs
-c00
 camel
 canberra
 catering
@@ -11818,7 +11786,6 @@ northeastern
 noticing
 nutritional
 ow
-p00
 pathways
 pedal
 pest
@@ -11983,7 +11950,6 @@ lizard
 lyric
 maximize
 morally
-mp3
 mushroom
 naples
 nigga
@@ -12012,7 +11978,6 @@ reproduce
 researching
 rigged
 rite
-s00
 safari
 saunders
 scaling
@@ -12232,7 +12197,6 @@ apartheid
 arises
 arthritis
 authorised
-b00
 bale
 barton
 beaver
@@ -12564,7 +12528,6 @@ wes
 williamson
 yankee
 yarn
-5k
 abide
 accumulation
 admiration
@@ -12820,7 +12783,6 @@ flyer
 forecasts
 foreman
 framing
-g00
 gallagher
 geared
 geoff
@@ -12910,7 +12872,6 @@ willingly
 woah
 wrapping
 youthful
-2a
 accents
 adhere
 adidas
@@ -12962,7 +12923,6 @@ distressed
 dumbass
 dungeon
 dwell
-e00
 edison
 edith
 enforcing
@@ -13099,7 +13059,6 @@ winger
 wordpress
 wraps
 youngsters
-1m
 abby
 abdomen
 abducted
@@ -13289,8 +13248,6 @@ witty
 woven
 wyatt
 zack
-2k
-2x
 acquaintance
 ambassadors
 ambush
@@ -13429,7 +13386,6 @@ publishes
 puff
 pun
 puzzles
-r2
 rag
 raj
 rampant
@@ -13667,7 +13623,6 @@ ul
 unicorn
 uniquely
 unrealistic
-v8
 vase
 vat
 vineyard
@@ -13804,7 +13759,6 @@ pleading
 professions
 quirky
 quran
-r00
 randolph
 rationale
 reap
@@ -14076,9 +14030,6 @@ wrestler
 yrs
 zimmerman
 zoning
-4g
-5pm
-5s
 abandoning
 abolition
 accessibility
@@ -14174,7 +14125,6 @@ judgments
 licking
 ling
 loft
-m2
 massively
 mediated
 mediation
@@ -14182,7 +14132,6 @@ merrill
 metrics
 millennials
 modular
-n00
 nico
 nutrient
 occupies
@@ -14413,7 +14362,6 @@ preventive
 profitability
 progressing
 provoke
-ps3
 pulmonary
 punishing
 radicals
@@ -14457,13 +14405,11 @@ troubling
 tug
 twists
 utilization
-v00
 volkswagen
 walkers
 wink
 woodward
 yugoslavia
-a2
 actresses
 adhd
 ae
@@ -14667,8 +14613,6 @@ weston
 wouldnt
 xavier
 yorker
-3m
-6pm
 abel
 abolish
 accessing
@@ -14802,11 +14746,9 @@ nightly
 normandy
 notwithstanding
 ns
-o2
 ordained
 originating
 orphans
-p000
 pans
 paralysis
 patiently
@@ -14838,7 +14780,6 @@ righteousness
 rinse
 robbins
 rss
-s2
 scalp
 schultz
 scrolling
@@ -14896,7 +14837,6 @@ wrestle
 xv
 yates
 yoo
-1a
 aap
 accountants
 achilles
@@ -15475,7 +15415,6 @@ wavelength
 workload
 xii
 yells
-1b
 acquitted
 admiralty
 ageing
@@ -15534,7 +15473,6 @@ escalated
 everlasting
 excellency
 executions
-f00
 faking
 feasibility
 federally
@@ -15634,7 +15572,6 @@ rockefeller
 roe
 royalties
 rubble
-s3
 sacrificing
 saddam
 sapphire
@@ -15735,7 +15672,6 @@ corridors
 couldnt
 creamy
 cubes
-d00
 daryl
 deterioration
 diapers
@@ -15901,9 +15837,6 @@ whoops
 wichita
 wilmington
 zambia
-2b
-7pm
-9am
 accelerator
 accuses
 acrylic
@@ -16081,7 +16014,6 @@ unconventional
 unnecessarily
 unnoticed
 untouched
-v2
 vega
 vibrations
 virgil
@@ -16095,7 +16027,6 @@ withdrawals
 withdrawing
 wrestlers
 yong
-8pm
 abbas
 adultery
 agile
@@ -16305,9 +16236,6 @@ whispering
 windshield
 wolfe
 zodiac
-3a
-3g
-9pm
 abandonment
 abyss
 accession
@@ -16623,7 +16551,6 @@ langley
 liners
 liv
 lv
-m3
 madagascar
 magnum
 malay
@@ -16737,8 +16664,6 @@ wetlands
 whitman
 wrecking
 xiv
-3s
-4pm
 abigail
 abrupt
 acronym
@@ -17001,7 +16926,6 @@ cropped
 crore
 crowley
 curfew
-d2
 daytona
 decidedly
 delusion
@@ -17123,7 +17047,6 @@ roadway
 rollins
 rustic
 rutherford
-s1
 sanitary
 sao
 saturation
@@ -17173,9 +17096,6 @@ woken
 wrench
 wretched
 www
-x2
-1s
-3pm
 adler
 adolescence
 affirmed
@@ -17294,8 +17214,6 @@ leroy
 linebacker
 lockheed
 lowers
-m000
-m1
 magically
 marketers
 mastermind
@@ -17611,10 +17529,6 @@ whores
 widened
 yin
 yun
-3ds
-4s
-8am
-a4
 academies
 acidic
 adherence
@@ -17669,7 +17583,6 @@ cullen
 cures
 curled
 cylindrical
-d1
 davey
 deceptive
 deem
@@ -17840,7 +17753,6 @@ tombs
 troopers
 tsa
 tyrone
-u2
 unaffected
 uncles
 undeniable
@@ -17854,10 +17766,6 @@ watered
 wick
 worldly
 wp
-1k
-2m
-2pm
-3x
 achieves
 additive
 adept
@@ -18154,7 +18062,6 @@ dictates
 dion
 dissatisfaction
 dodgy
-e3
 earthly
 eaters
 elective
@@ -18274,7 +18181,6 @@ roche
 rodents
 rowan
 rudolph
-s4
 saharan
 scumbag
 seams
@@ -18491,7 +18397,6 @@ prioritize
 proprietor
 putnam
 quarrel
-r000
 raider
 rained
 raja
@@ -18542,8 +18447,6 @@ streaks
 strides
 strung
 summaries
-t1
-t2
 tanning
 tendon
 thc
@@ -18572,8 +18475,6 @@ willard
 woe
 wrinkles
 ws
-3am
-6s
 abi
 abstraction
 adjunct
@@ -18791,7 +18692,6 @@ xiao
 yamaha
 zara
 zipper
-a3
 acclaim
 aching
 acquires
@@ -19044,8 +18944,6 @@ wreckage
 xml
 yvonne
 zeppelin
-4a
-a0000
 aches
 adamant
 airspace
@@ -19205,7 +19103,6 @@ proverbs
 puke
 puzzled
 quadrant
-r1
 ramps
 recital
 recite
@@ -19528,7 +19425,6 @@ wasteful
 waterfalls
 wilkes
 youngster
-6am
 activating
 adopts
 adverts
@@ -19578,7 +19474,6 @@ convex
 crouch
 culmination
 curing
-d000
 daphne
 decomposition
 dehydrated
@@ -19696,7 +19591,6 @@ ordinarily
 orthodoxy
 outage
 overcame
-p2
 packer
 paternal
 pellets
@@ -19764,7 +19658,6 @@ tortoise
 tragically
 transitioning
 translators
-twenty00
 typewriter
 understandably
 undisputed
@@ -19781,7 +19674,6 @@ whaling
 wiggle
 worldview
 wrongdoing
-x1
 zuckerberg
 abusers
 accommodating
@@ -19822,7 +19714,6 @@ bridging
 brighten
 budgeting
 bulletproof
-c4
 cambodian
 campers
 cassandra
@@ -19934,7 +19825,6 @@ leach
 lefty
 legislatures
 lsd
-m4
 mabel
 maddie
 maids
@@ -19998,3 +19888,113 @@ scrum
 seasonally
 selena
 shan
+sharper
+shen
+showcases
+slade
+sluggish
+slum
+smoothie
+snare
+snipers
+snowflake
+sod
+spectra
+spines
+spoiling
+ssr
+stag
+stomp
+strangest
+strata
+straws
+studded
+submissive
+subsection
+suede
+summertime
+sundance
+swedes
+sylvester
+tabloid
+taft
+taurus
+teal
+thorns
+throwback
+thunderstorm
+timid
+towering
+tracts
+triathlon
+trickle
+tsp
+tweed
+ultimatum
+uncut
+uninterrupted
+vettel
+webinar
+weekdays
+weinstein
+widen
+widest
+wigs
+workin
+wrestlemania
+xmas
+yachts
+yelp
+yoon
+abt
+aclu
+affirmation
+amassed
+amherst
+annette
+aol
+apc
+apiece
+appalled
+appreciative
+arched
+archibald
+ascend
+bandage
+belize
+biologists
+bittersweet
+blight
+botswana
+braid
+branching
+brewster
+bulge
+byrd
+cabaret
+camilla
+caregivers
+carmichael
+catheter
+centimeters
+chemically
+chewed
+cinematography
+cleans
+coincidentally
+collingwood
+compartments
+conducive
+confines
+cong
+conscientious
+consensual
+consumes
+contrasted
+cpa
+crystalline
+cuffs
+cyanide
+deadpool
+deceit
+delusions

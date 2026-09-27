@@ -7,7 +7,7 @@ machine with internet:
                                            # runs/fuzzy_threshold/{report.json, threshold.png}
 Data: every class of MNIST / EMNIST / CIFAR-10 as the bare keyword a client would type
 (rt_descriptions.keyword); one simulated client per (dataset, writer). Default: 3 English writers with
-different wordings ('car' / 'automobile' / 'auto', 'three' / '3'); --langs en,zh,es,ja,fr,de for 6 languages.
+different wordings ('car' / 'automobile' / 'auto'; words and letters only); --langs en,zh,es,ja,fr,de for 6 languages.
 Score: the protocol's grouping (snap to anchor class, exact union; in the clear, the secure version
 gives the same groups), pairwise MCC over (client, label) instances vs the true class.
 Grid: anchors N (vocabulary prefix) x merge (mutual-NN synonym cosine; 1 = none) x hub (CSLS k; 0 = plain
@@ -22,7 +22,7 @@ import numpy as np
 
 from label_union.encoder import DEFAULT_MODEL, embed
 from label_union.fuzzy_union import (PARAMS_FILE, anchor_classes, anchor_words, client_keys, false_friends,
-                                     hub_penalty, union)
+                                     hub_penalty, normalize, union)
 from rt_descriptions import LANGS, keyword
 
 DATASETS = {'MNIST': [str(d) for d in range(10)],
@@ -50,10 +50,10 @@ def main():
     ap.add_argument('--model', default=DEFAULT_MODEL)
     ap.add_argument('--langs', default='en0,en1,en2',
                     help=f'en0,en1,en2 = English writers with different wordings; or {",".join(LANGS)}')
-    ap.add_argument('--anchors', default='2000,5000,10000,20000')
+    ap.add_argument('--anchors', default='2000,3000,5000,10000,20000')
     ap.add_argument('--merges', default='1,.9,.7,.5')
     ap.add_argument('--hubs', default='0,5,10,20')
-    ap.add_argument('--floors', default='0,.5')
+    ap.add_argument('--floors', default='0')
     ap.add_argument('--no-domain', action='store_true', help='ignore the image check')
     ap.add_argument('--out', type=Path, default=Path('runs/fuzzy_threshold'))
     ap.add_argument('--no-write-params', action='store_true')
@@ -63,7 +63,7 @@ def main():
     words = anchor_words(Ns[-1])
     A = embed(words, a.model)                                            # also fills the cache
     clients = [(d, lang, DATASETS[d]) for d in DATASETS for lang in langs]
-    texts = [[keyword(d, x, lang) for x in labels] for d, lang, labels in clients]
+    texts = [[normalize(keyword(d, x, lang)) for x in labels] for d, lang, labels in clients]
     E = [embed(t, a.model) for t in texts]
     doms = [None if a.no_domain else {x: DOMAIN[d] for x in labels} for d, _, labels in clients]
     inst = [(i, x) for i, (_, _, labels) in enumerate(clients) for x in labels]

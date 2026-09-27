@@ -3,7 +3,7 @@
 Each client, locally and before anything is sent:
   1. embeds its own keyword for each label (any language) with the public cross-lingual encoder;
   2. snaps it to the nearest word of the public anchor vocabulary (anchor_words.txt: the 20k most
-     frequent English words from wordfreq, minus words >= 8x more frequent in fr/es/de/it/pt/nl, so
+     frequent English words from wordfreq (letters only, no numerals), minus words >= 8x more frequent in fr/es/de/it/pt/nl, so
      'auto' or 'tres' cannot capture a foreign keyword; generic, not a label list; the first
      `anchors` are used);
   3. replaces that word by its synonym class: mutual nearest neighbours of the vocabulary with
@@ -12,6 +12,7 @@ Snapping score (step 2) is CSLS when hub = k > 0: 2 cos(x, a) - mean cos of a to
 so 'hub' words that sit close to everything ('dna', 'asian') stop capturing keywords. A client that
 declares its language skips anchors more frequent in that language than in English (public wordfreq
 list anchor_false_friends.json): French 'chat' must not snap to English 'chat'.
+Keywords are normalized first (normalize: NFKC, '3' -> 'three').
 A single Latin letter keeps its own text, case kept: letters are written the same in every language,
 and 'A' vs 'a' is a visual distinction an encoder does not make ('3' still snaps, so it can meet 'three').
 The class id (| image-domain code) is then an ordinary exact label and oprf_union_with_keys runs
@@ -33,6 +34,7 @@ import numpy as np
 PARAMS_FILE = Path(__file__).with_name('fuzzy_params.json')
 WORDS_FILE = Path(__file__).with_name('anchor_words.txt')
 FALSE_FRIENDS = Path(__file__).with_name('anchor_false_friends.json')
+NUMBER_WORDS = 'zero one two three four five six seven eight nine'.split()
 DEFAULTS = dict(anchors=20000, merge=.8, floor=.3, hub=0)                 # overridden by fuzzy_params.json
 
 
@@ -104,6 +106,13 @@ def load_anchors(model, n, merge, hub=0):
     return A, anchor_classes(A, merge), hub_penalty(A, hub)
 
 
+def normalize(t):
+    """Public text normalization before embedding: NFKC, trimmed, a bare numeral spelled out
+    ('3' -> 'three': the encoder does not put numerals next to number words)."""
+    t = unicodedata.normalize('NFKC', str(t)).strip()
+    return NUMBER_WORDS[int(t)] if len(t) == 1 and t.isascii() and t.isdigit() else t
+
+
 def client_keys(labels, texts, E, A, cls, floor, domains=None, pen=None, skip=()):
     """Local: {label: exact key}. E = embeddings of this client's keywords (texts); pen = hub
     penalty per anchor (CSLS), skip = anchors this client ignores (its language's false friends)."""
@@ -129,7 +138,7 @@ def local_keys(names, keywords, p, domains=None):
     langs = p.get('langs') or [None] * len(names)                        # each client's own language
     out = []
     for i, labels in enumerate(names):
-        texts = [keywords[i][x] for x in labels]
+        texts = [normalize(keywords[i][x]) for x in labels]
         out.append(client_keys(labels, texts, encoder.embed(texts, model), A, cls, p['floor'],
                                domains[i] if domains else None, pen, false_friends(langs[i], len(A))))
     return out

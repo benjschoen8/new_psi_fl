@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from label_union.fuzzy_union import (anchor_classes, anchor_words, client_keys, components, false_friends,
-                                     hub_penalty, union)
+                                     hub_penalty, normalize, union)
 
 
 def unit(v):
@@ -36,7 +36,8 @@ class FuzzyAnchorTests(unittest.TestCase):
         self.assertEqual(len(w), 20000)
         self.assertEqual(len(set(w)), 20000)
         self.assertTrue({'three', 'zero', 'cat', 'car', 'truck'} <= set(w))
-        self.assertFalse({'auto', 'tres', 'de'} & set(w))                     # foreign words would capture keywords
+        self.assertFalse({'auto', 'tres', 'de'} & set(w))
+        self.assertTrue(all(x.isascii() and x.isalpha() for x in w))                 # words only, no numerals                     # foreign words would capture keywords
         self.assertEqual(anchor_words(5), w[:5])
 
     def test_components(self):
@@ -65,6 +66,10 @@ class FuzzyAnchorTests(unittest.TestCase):
         A = unit([[1, 0], [.9, .44]])                                        # 0 = 'chat', 1 = 'cat'
         k = lambda skip: client_keys(['cat'], ['chat'], A[:1], A, anchor_classes(A, 1), 0, skip=skip)['cat']
         self.assertEqual((k(()), k(np.array([0]))), ('anchor:0', 'anchor:1'))
+
+    def test_normalize_spells_out_numerals(self):
+        self.assertEqual([normalize(t) for t in ('3', ' ３ ', 'three', '三', 'g', '10')],
+                         ['three', 'three', 'three', '三', 'g', '10'])
 
     def test_letters_keep_their_text(self):
         words, A, emb = fake_space(['a'], {'a': ['a']})
