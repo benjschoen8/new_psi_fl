@@ -40,18 +40,26 @@ CIFAR10 = {
     "truck":      {"zh": "卡車", "es": "un camión", "ja": "トラック", "fr": "d'un camion", "de": "einem Lastwagen"},
 }
 LANGS = list(DIGIT)
-NOUN = {"es": "avión coche pájaro gato ciervo perro rana caballo barco camión",
-        "fr": "avion voiture oiseau chat cerf chien grenouille cheval bateau camion",
-        "de": "Flugzeug Auto Vogel Katze Hirsch Hund Frosch Pferd Schiff Lastwagen"}
+# simple keywords (fuzzy union): the plain word a person types for the class in their language
+DIGIT_KW = dict(DIGIT, ja=["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"])   # kanji, not readings
+CIFAR_KW = {"en": "plane car bird cat deer dog frog horse ship truck",
+            "zh": "飛機 汽車 鳥 貓 鹿 狗 青蛙 馬 船 卡車",
+            "ja": "飛行機 車 鳥 猫 鹿 犬 カエル 馬 船 トラック",
+            "es": "avión coche pájaro gato ciervo perro rana caballo barco camión",
+            "fr": "avion voiture oiseau chat cerf chien grenouille cheval bateau camion",
+            "de": "Flugzeug Auto Vogel Katze Hirsch Hund Frosch Pferd Schiff Lastwagen"}
 
 
 def keyword(dataset, name, lang):
-    """The bare word a client would type for its label (fuzzy union): 'three', 'tres', '三', 'gato', 'g'."""
+    """The bare word a client types for its label (fuzzy union): 'three', 'tres', '三', 'gato', 'g'."""
     name = str(name)
     if name.isdigit() and len(name) == 1:
-        return DIGIT[lang][int(name)]
+        return DIGIT_KW[lang][int(name)]
     if len(name) == 1 and name.isalpha():                         # Latin letters are written as is
         return name
+    if name in CIFAR10:
+        return CIFAR_KW[lang].split()[list(CIFAR10).index(name)]
+    return name
     if name in CIFAR10:
         if lang == "en":
             return name

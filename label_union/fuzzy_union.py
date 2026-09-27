@@ -3,9 +3,13 @@
 Each client, locally and before anything is sent:
   1. embeds its own keyword for each label (any language) with the public cross-lingual encoder;
   2. snaps it to the nearest word of the public anchor vocabulary (anchor_words.txt: the 20k most
-     frequent English words from wordfreq; generic, not a label list; the first `anchors` are used);
-  3. replaces that word by its synonym class: connected components of the vocabulary at cosine
-     >= `merge` ('3' / 'three'), computed from public data only, identical at every client.
+     frequent English words from wordfreq, minus words >= 8x more frequent in fr/es/de/it/pt/nl, so
+     'auto' or 'tres' cannot capture a foreign keyword; generic, not a label list; the first
+     `anchors` are used);
+  3. replaces that word by its synonym class: mutual nearest neighbours of the vocabulary with
+     cosine >= `merge` ('boat' / 'ship'; pairs only, so no chains), public, identical at every client.
+A single Latin letter or digit keeps its own text, case kept: symbols are written the same in every
+language, and 'A' vs 'a' is a visual distinction an encoder does not make.
 The class id (| image-domain code) is then an ordinary exact label and oprf_union_with_keys runs
 unchanged. A keyword whose nearest anchor has cosine < `floor` keeps its own text (it then matches
 identical wording only).
@@ -13,8 +17,7 @@ identical wording only).
 Leakage = the exact protocol: Aggregator U only; clients U; nobody learns who holds what, counts, or
 how similar two labels are (grouping is local, against public data). Setup cost = the exact union
 (+ local encoding). The price of fuzziness is quality: keywords near a class boundary split (recall),
-distinct labels snapping to one class merge (precision; the vocabulary is lowercase, so EMNIST 'A'
-and 'a' merge). tests/fuzzy_threshold.py picks (anchors, merge, floor) by group MCC.
+distinct labels snapping to one class merge (precision). tests/fuzzy_threshold.py picks (anchors, merge, floor) by group MCC.
 """
 import json
 import unicodedata
@@ -55,19 +58,20 @@ def components(n, pairs):
     return np.array([order[r] for r in roots])
 
 
-def similar_pairs(A, merge, block=2048):
-    """(i, j), i < j, with cos(A_i, A_j) >= merge."""
-    out = []
+def mutual_pairs(A, merge, block=2048):
+    """(i, j), i < j: each is the other's nearest anchor and cos >= merge."""
+    nn, best = np.empty(len(A), int), np.empty(len(A), np.float32)
     for s in range(0, len(A), block):
-        i, j = np.nonzero(A[s:s + block] @ A.T >= merge)
-        keep = i + s < j
-        out.append(np.stack([i[keep] + s, j[keep]], 1))
-    return np.concatenate(out) if out else np.zeros((0, 2), int)
+        S = A[s:s + block] @ A.T
+        S[np.arange(len(S)), np.arange(s, s + len(S))] = -2                  # not itself
+        nn[s:s + len(S)], best[s:s + len(S)] = S.argmax(1), S.max(1)
+    i = np.flatnonzero((nn[nn] == np.arange(len(A))) & (best >= merge))
+    return np.stack([i, nn[i]], 1)[i < nn[i]]
 
 
 def anchor_classes(A, merge):
     """Synonym class of every anchor (public). merge >= 1: every word its own class."""
-    return np.arange(len(A)) if merge >= 1 else components(len(A), similar_pairs(A, merge))
+    return np.arange(len(A)) if merge >= 1 else components(len(A), mutual_pairs(A, merge))
 
 
 @lru_cache(maxsize=4)
@@ -83,7 +87,9 @@ def client_keys(labels, texts, E, A, cls, floor, domains=None):
     near = S.argmax(1)
     out = {}
     for x, t, j, s in zip(labels, texts, near, S[np.arange(len(labels)), near]):
-        key = f'anchor:{cls[j]}' if s >= floor else 'text:' + unicodedata.normalize('NFKC', t).strip()
+        t = unicodedata.normalize('NFKC', t).strip()
+        symbol = len(t) == 1 and t.isascii() and t.isalnum()
+        key = f'anchor:{cls[j]}' if s >= floor and not symbol else 'text:' + t
         out[x] = key + (f'|{domains[x]}' if domains else '')
     return out
 

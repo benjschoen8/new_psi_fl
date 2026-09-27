@@ -34,16 +34,25 @@ class FuzzyAnchorTests(unittest.TestCase):
         w = anchor_words()
         self.assertEqual(len(w), 20000)
         self.assertEqual(len(set(w)), 20000)
-        self.assertTrue({'three', '3', 'cat', 'truck', 'g'} <= set(w))
+        self.assertTrue({'three', 'zero', 'cat', 'car', 'truck'} <= set(w))
+        self.assertFalse({'auto', 'tres', 'de'} & set(w))                     # foreign words would capture keywords
         self.assertEqual(anchor_words(5), w[:5])
 
     def test_components(self):
         self.assertEqual(components(5, [(0, 3), (3, 4)]).tolist(), [0, 1, 2, 0, 0])
 
-    def test_synonym_classes(self):
+    def test_synonym_classes_mutual_nearest_only(self):
         words, A, _ = fake_space(['three', 'cat'], {'three': ['3', 'three'], 'cat': ['cat']})
         self.assertEqual(anchor_classes(A, .9).tolist(), [0, 0, 1])          # '3' ~ 'three'
         self.assertEqual(anchor_classes(A, 1).tolist(), [0, 1, 2])           # no merging
+        chain = unit([[1, 0], [.96, .28], [.8, .6], [.6, .8]])               # 0-1 mutual, 2 and 3 not chained in
+        self.assertEqual(anchor_classes(chain, .5).tolist(), [0, 0, 1, 1])
+
+    def test_letters_and_digits_keep_their_text(self):
+        words, A, emb = fake_space(['a'], {'a': ['a']})
+        v = np.stack([emb('a'), emb('a')])
+        self.assertEqual(client_keys(['A', 'a'], ['A', 'a'], v, A, anchor_classes(A, 1), .3),
+                         {'A': 'text:A', 'a': 'text:a'})
 
     def test_keywords_in_any_language_meet_and_floor_falls_back_to_text(self):
         concepts = ['cat', 'dog', 'ship']

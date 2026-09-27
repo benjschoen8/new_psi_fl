@@ -9,7 +9,8 @@ Data: every class of MNIST / EMNIST / CIFAR-10 as the bare keyword a client woul
 (rt_descriptions.keyword) in 6 languages; one simulated client per (dataset, language).
 Score: the protocol's grouping (snap to anchor class, exact union; in the clear, the secure version
 gives the same groups), pairwise MCC over (client, label) instances vs the true class.
-Grid: anchors N (vocabulary prefix) x merge (synonym cosine; 1 = none) x floor (min snap cosine).
+Grid: anchors N (vocabulary prefix) x merge (mutual-NN synonym cosine; 1 = none) x floor (min snap cosine).
+The log ends with every split class and every merged group of the best setting.
 """
 import argparse
 import json
@@ -18,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from label_union.encoder import DEFAULT_MODEL, embed
-from label_union.fuzzy_union import PARAMS_FILE, anchor_words, client_keys, components, similar_pairs, union
+from label_union.fuzzy_union import PARAMS_FILE, anchor_classes, anchor_words, client_keys, union
 from rt_descriptions import LANGS, keyword
 
 DATASETS = {'MNIST': [str(d) for d in range(10)],
@@ -46,7 +47,7 @@ def main():
     ap.add_argument('--model', default=DEFAULT_MODEL)
     ap.add_argument('--langs', default=','.join(LANGS))
     ap.add_argument('--anchors', default='2000,5000,10000,20000')
-    ap.add_argument('--merges', default='1,.95,.9,.85,.8,.75,.7')
+    ap.add_argument('--merges', default='1,.9,.8,.7,.6,.5')
     ap.add_argument('--floors', default='0,.3,.4,.5')
     ap.add_argument('--no-domain', action='store_true', help='ignore the image check')
     ap.add_argument('--out', type=Path, default=Path('runs/fuzzy_threshold'))
@@ -66,9 +67,8 @@ def main():
 
     grid = []
     for merge in sorted(map(float, a.merges.split(',')), reverse=True):
-        pairs = similar_pairs(A, merge) if merge < 1 else np.zeros((0, 2), int)
         for N in Ns:
-            cls = components(N, pairs[(pairs < N).all(1)]) if merge < 1 else np.arange(N)
+            cls = anchor_classes(A[:N], merge)
             for floor in map(float, a.floors.split(',')):
                 keys = [client_keys(labels, t, e, A[:N], cls, floor, dm)
                         for (_, _, labels), t, e, dm in zip(clients, texts, E, doms)]
@@ -85,22 +85,32 @@ def main():
 
     # what every keyword snapped to under the best setting (for the paper / sanity)
     N = best['anchors']
-    pairs = similar_pairs(A[:N], best['merge']) if best['merge'] < 1 else np.zeros((0, 2), int)
-    cls = components(N, pairs) if best['merge'] < 1 else np.arange(N)
-    snaps = {}
-    for (d, lang, labels), t, e in zip(clients, texts, E):
+    cls = anchor_classes(A[:N], best['merge'])
+    snaps, members = {}, {}
+    keys = [client_keys(labels, t, e, A[:N], cls, best['floor'], dm)
+            for (_, _, labels), t, e, dm in zip(clients, texts, E, doms)]
+    for (d, lang, labels), t, e, k in zip(clients, texts, E, keys):
         S = e @ A[:N].T
         j = S.argmax(1)
         for x, w, jj, s in zip(labels, t, j, S[np.arange(len(j)), j]):
-            snaps.setdefault(f'{d}/{x}', {})[lang] = f'{w} -> {words[jj]} (class {cls[jj]}, cos {s:.2f})'
+            snaps.setdefault(f'{d}/{x}', {})[lang] = f'{w} -> {words[jj]} (cos {s:.2f}) = {k[x]}'
+            members.setdefault(k[x], set()).add(x)
+    split = {c: v for c, v in snaps.items() if len({s.split(' = ')[1] for s in v.values()}) > 1}
+    merged = {k: sorted(v) for k, v in members.items() if len(v) > 1}
     report = dict(model=a.model, langs=langs, domain_check=not a.no_domain, best=best, true_labels=len(set(truth)),
-                  grid=grid, snaps=snaps)
+                  grid=grid, split=split, merged=merged, snaps=snaps)
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / 'report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False))
     if not a.no_write_params:
         PARAMS_FILE.write_text(json.dumps(dict(model=a.model, anchors=best['anchors'], merge=best['merge'],
                                                floor=best['floor']), indent=2))
     plot(grid, best, a.out / 'threshold.png')
+    print(f'\n{len(split)} classes split across languages (best setting):')
+    for c, v in split.items():
+        print(f'  {c}: ' + ' | '.join(f'{l}: {s}' for l, s in v.items()))
+    print(f'{len(merged)} groups holding several classes:')
+    for k, v in merged.items():
+        print(f'  {k}: {v}')
     print(f"\nbest: N={best['anchors']} merge={best['merge']} floor={best['floor']}  MCC={best['mcc']:.3f} "
           f"P={best['precision']:.3f} R={best['recall']:.3f} groups={best['groups']}/{len(set(truth))}  "
           + ' '.join(f'{d}={v:.2f}' for d, v in best['per_dataset'].items()))
