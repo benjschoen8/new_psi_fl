@@ -12,6 +12,8 @@
 #
 # A finished run gets a DONE file and is skipped next time; an unfinished one resumes from its
 # checkpoint; a failing one is retried RETRIES times. Logs: $OUT/logs/<run>.log, progress: $OUT/progress.log
+# In a terminal the screen shows live progress bars + ETA per run (tests/progress.py), refreshed every
+# REFRESH seconds; MONITOR=0 turns that off (plain event lines instead), MONITOR=1 forces it on.
 set -uo pipefail
 cd "$(dirname "$0")"
 
@@ -25,14 +27,30 @@ ABLATIONS=${ABLATIONS:-0}
 RETRIES=${RETRIES:-3}
 OUT=${OUT:-runs/paper}
 EXTRA=${EXTRA:-}                   # extra CLI flags for every run, e.g. EXTRA="--smoke" for a dry run
+MONITOR=${MONITOR:-auto}
+REFRESH=${REFRESH:-30}
 
 mkdir -p "$OUT/logs" "$OUT/figs"
-say() { echo "[$(date '+%F %T')] $*" | tee -a "$OUT/progress.log"; }
+quiet=
+if [[ $MONITOR == 1 || ( $MONITOR == auto && -t 1 ) ]]; then
+    $PY -m tests.progress --out "$OUT" --watch "$REFRESH" &     # live bars; events go to progress.log
+    monitor=$!
+    trap 'kill $monitor 2>/dev/null' EXIT
+    quiet=1
+fi
+stop_monitor() { [[ -n $quiet ]] && kill "$monitor" 2>/dev/null && wait "$monitor" 2>/dev/null; quiet=; }
+say() {
+    local line="[$(date '+%F %T')] $*"
+    echo "$line" >> "$OUT/progress.log"
+    [[ -z $quiet ]] && echo "$line"
+    return 0
+}
 
 run() {  # run <name> <rounds> <workers> [cli flags...]
     local name=$1 rounds=$2 workers=$3; shift 3
     local dir=$OUT/$name log=$OUT/logs/$name.log
     if [[ -f $dir/DONE ]]; then say "skip  $name (already done)"; return 0; fi
+    mkdir -p "$dir" && echo "$rounds" > "$dir/target_rounds"     # lets tests/progress.py show it at once
     for ((try = 1; try <= RETRIES; try++)); do
         local resume=()
         [[ -f $dir/checkpoint_last.pt ]] && resume=(--resume "$dir/checkpoint_last.pt")
@@ -46,7 +64,8 @@ run() {  # run <name> <rounds> <workers> [cli flags...]
             return 0
         fi
         say "FAIL  $name (try $try), last lines of $log:"
-        tail -n 5 "$log" | sed 's/^/        /' | tee -a "$OUT/progress.log"
+        tail -n 5 "$log" | sed 's/^/        /' >> "$OUT/progress.log"
+        [[ -z $quiet ]] && tail -n 5 "$log" | sed 's/^/        /'
         sleep ${RETRY_WAIT:-10}
     done
     return 1
@@ -93,6 +112,8 @@ if [[ $ABLATIONS == 1 ]]; then
     plot min_holders "ours_t1:t = 1" "ours:t = 2"
 fi
 
+stop_monitor
+$PY -m tests.progress --out "$OUT"
 $PY - "$OUT" <<'EOF' | tee -a "$OUT/progress.log"
 import json, sys
 from pathlib import Path

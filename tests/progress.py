@@ -1,4 +1,6 @@
 """Progress bars for every run of run_experiments.sh (reads the runs' files; never touches them).
+States: loading (reading datasets, building clients) -> setup (label union, round 1) -> running -> done;
+stalled? = no new output for 3 rounds + 10 min.
 
   python -m tests.progress                    # once
   python -m tests.progress --watch 30         # refresh every 30 s (Ctrl-C to quit)
@@ -12,7 +14,9 @@ from pathlib import Path
 
 def status(run, width):
     args = json.loads((run / 'args.json').read_text()) if (run / 'args.json').exists() else {}
-    total = int(args['rounds']) if str(args.get('rounds', 'None')).isdigit() else 45
+    target = run / 'target_rounds'                                    # written by run_experiments.sh
+    total = (int(target.read_text()) if target.exists() else
+             int(args['rounds']) if str(args.get('rounds', 'None')).isdigit() else 45)
     rows = []
     if (run / 'metrics.jsonl').exists():
         for line in (run / 'metrics.jsonl').read_text().splitlines():
@@ -30,7 +34,8 @@ def status(run, width):
         idle = time.time() - max(p.stat().st_mtime for p in (log, run / 'metrics.jsonl') if p.exists()) \
             if log.exists() else None
         stalled = per is not None and idle is not None and idle > 3 * per + 600
-        state = 'stalled?' if stalled else ('setup' if not rows else 'running')
+        started = (run / 'args.json').exists()
+        state = 'stalled?' if stalled else ('running' if rows else 'setup' if started else 'loading')
         eta = f'ETA {fmt((total - done_rounds) * per)}' if per else ''
     fill = int(width * done_rounds / total) if total else 0
     acc = f"acc {rows[-1]['accuracy']:.4f}" if rows else ''
@@ -43,10 +48,12 @@ def fmt(s):
 
 
 def show(out, width=30):
-    runs = sorted(p for p in Path(out).iterdir() if p.is_dir() and (p / 'args.json').exists())
+    out = Path(out)
+    runs = sorted(p for p in out.iterdir() if p.is_dir() and
+                  ((p / 'args.json').exists() or (p / 'target_rounds').exists())) if out.exists() else []
     lines = [time.strftime('%F %T') + f'   {out}'] + [status(r, width) for r in runs]
     if not runs:
-        lines.append('(no runs yet)')
+        lines.append('(no runs started yet)')
     prog = Path(out) / 'progress.log'
     if prog.exists():
         events = [l for l in prog.read_text().splitlines() if l.startswith('[')]
