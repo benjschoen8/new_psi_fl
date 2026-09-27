@@ -2,6 +2,7 @@
 # Whole no-cluster paper experiment in one command (resumable: just run it again after a crash).
 #
 #   phase 1  accuracy: Plain-GeFL and Ours, ROUNDS rounds each, both at once (one GPU is enough)
+#            FUZZY=1: + Ours with the fuzzy union (--union fuzzy, no shared names) after the pair
 #   phase 2  cost: plain / ours-uncompressed / ours, TIME_ROUNDS rounds each, one at a time (clean timings)
 #   phase 3  ablations (ABLATIONS=1): min-holders 1, keep-frac 0.5 / 0.2 / 0.05, two at a time
 #   phase 4  figures (tests/plot_paper.py) + a summary table
@@ -29,6 +30,7 @@ ABL_ROUNDS=${ABL_ROUNDS:-$ROUNDS}  # ablations only need the trend, e.g. ABL_ROU
 WARMUP=${WARMUP:-0}                # local generator epochs per client before round 1 (every run)
 TIME_ROUNDS=${TIME_ROUNDS:-3}
 ABLATIONS=${ABLATIONS:-0}
+FUZZY=${FUZZY:-0}                  # 1: also Ours with the fuzzy union (phases 1, 2 and the figures)
 RETRIES=${RETRIES:-3}
 OUT=${OUT:-runs/paper}
 EXTRA=${EXTRA:-}                   # extra CLI flags for every run, e.g. EXTRA="--smoke" for a dry run
@@ -101,6 +103,7 @@ RUN_GPU=${GPU_LIST[0]:-}                                   # single runs: first 
 if has 1; then
 say "phase 1: accuracy ($ROUNDS rounds, plain + ours in parallel)"
 pair "plain $ROUNDS $WORKERS --agg plain" "ours $ROUNDS $WORKERS" || fails=1
+[[ $FUZZY == 1 ]] && { run ours_fuzzy "$ROUNDS" "$WORKERS" --union fuzzy || fails=1; }
 fi
 
 if has 2; then
@@ -108,6 +111,7 @@ say "phase 2: cost ($TIME_ROUNDS rounds each, one at a time)"
 run time_plain    "$TIME_ROUNDS" "$TIME_WORKERS" --agg plain   || fails=1
 run time_ours_noq "$TIME_ROUNDS" "$TIME_WORKERS" --no-quantize || fails=1
 run time_ours     "$TIME_ROUNDS" "$TIME_WORKERS"               || fails=1
+[[ $FUZZY == 1 ]] && { run time_ours_fuzzy "$TIME_ROUNDS" "$TIME_WORKERS" --union fuzzy || fails=1; }
 fi
 
 if [[ $ABLATIONS == 1 ]] && has 3; then
@@ -128,8 +132,13 @@ plot() {  # plot <out name> <run:label>...
     $PY -m tests.plot_paper --runs "${runs[@]}" --labels "${labels[@]}" --out "$OUT/figs/$name" \
         >> "$OUT/logs/plots.log" 2>&1 && say "      $OUT/figs/$name/paper.{png,pdf,csv}"
 }
-plot accuracy "plain:Plain-GeFL" "ours:Ours"
-plot cost "time_plain:Plain-GeFL" "time_ours_noq:Ours (uncompressed)" "time_ours:Ours"
+if [[ $FUZZY == 1 ]]; then
+    plot accuracy "plain:Plain-GeFL" "ours:Ours (exact PSI)" "ours_fuzzy:Ours (fuzzy PSI)"
+    plot cost "time_plain:Plain-GeFL" "time_ours_noq:Ours (uncompressed)" "time_ours:Ours (exact PSI)" "time_ours_fuzzy:Ours (fuzzy PSI)"
+else
+    plot accuracy "plain:Plain-GeFL" "ours:Ours"
+    plot cost "time_plain:Plain-GeFL" "time_ours_noq:Ours (uncompressed)" "time_ours:Ours"
+fi
 if [[ $ABLATIONS == 1 ]]; then
     plot keep_frac "ours_k0.5:keep 0.5" "ours_k0.2:keep 0.2" "ours:keep 0.1" "ours_k0.05:keep 0.05"
     plot min_holders "ours_t1:t = 1" "ours:t = 2"
