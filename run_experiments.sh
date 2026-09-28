@@ -11,7 +11,8 @@
 #   DEVICE=cuda WORKERS=8 ABLATIONS=1 bash run_experiments.sh
 #   tmux new -s exp 'bash run_experiments.sh'                 # keeps running after you disconnect
 #
-# A finished run gets a DONE file and is skipped next time; an unfinished one resumes from its
+# Output: <OUT>_<YYYYMMDD-HHMM>/ per start (link: latest). With RESUME=<folder> a finished run (DONE file)
+# is skipped and an unfinished one resumes from its
 # checkpoint; a failing one is retried RETRIES times. Logs: $OUT/logs/<run>.log, progress: $OUT/progress.log
 # PHASES="2 3 4" runs only those phases (e.g. split the work between two machines; copy the finished
 # run folders into one $OUT before the final figures). GPUS="0 1": the two runs of a pair each get their
@@ -32,7 +33,15 @@ TIME_ROUNDS=${TIME_ROUNDS:-3}
 ABLATIONS=${ABLATIONS:-0}
 FUZZY=${FUZZY:-0}                  # 1: also Ours with the fuzzy union (phases 1, 2 and the figures)
 RETRIES=${RETRIES:-3}
-OUT=${OUT:-runs/paper}
+# every start gets its own folder <OUT>_<YYYYMMDD-HHMM> (+ link <dir of OUT>/latest);
+# RESUME=<that folder> (or RESUME=latest) continues / adds phases to an existing one instead
+if [[ -n ${RESUME:-} ]]; then
+    [[ $RESUME == latest ]] && RESUME=$(dirname "${OUT:-runs/paper}")/latest
+    [[ -d $RESUME ]] || { echo "RESUME=$RESUME: no such folder" >&2; exit 1; }
+    OUT=$(cd "$RESUME" && pwd -P)
+else
+    OUT=${OUT:-runs/paper}_$(date +%Y%m%d-%H%M)
+fi
 EXTRA=${EXTRA:-}                   # extra CLI flags for every run, e.g. EXTRA="--smoke" for a dry run
 PHASES=${PHASES:-1 2 3 4}
 read -r -a GPU_LIST <<< "${GPUS:-}"
@@ -40,6 +49,8 @@ MONITOR=${MONITOR:-auto}
 REFRESH=${REFRESH:-30}
 
 mkdir -p "$OUT/logs" "$OUT/figs"
+ln -sfn "$(cd "$OUT" && pwd -P)" "$(dirname "$OUT")/latest" 2>/dev/null || true
+echo "output folder: $OUT"
 quiet=
 if [[ $MONITOR == 1 || ( $MONITOR == auto && -t 1 ) ]]; then
     $PY -m tests.progress --out "$OUT" --watch "$REFRESH" &     # live bars; events go to progress.log
@@ -137,7 +148,7 @@ plot() {  # plot <out name> <run:label>...
     for rl in "$@"; do
         if [[ ! -f $OUT/${rl%%:*}/DONE ]]; then
             local need="phase 1"; [[ ${rl%%:*} == time_* ]] && need="phase 2"
-            say "      $name figure skipped: ${rl%%:*} not finished (run $need into this OUT, e.g. PHASES=\"${need#phase } 4\")"
+            say "      $name figure skipped: ${rl%%:*} not finished (add it: RESUME=$OUT PHASES=\"${need#phase } 4\" bash run_experiments.sh)"
             return
         fi
         runs+=("$OUT/${rl%%:*}"); labels+=("${rl#*:}")
@@ -181,5 +192,5 @@ EOF
 
 fi
 
-if (( fails )); then say "finished WITH FAILURES: see $OUT/progress.log, rerun this script to retry"; exit 1; fi
+if (( fails )); then say "finished WITH FAILURES: see $OUT/progress.log; retry with RESUME=$OUT bash run_experiments.sh"; exit 1; fi
 say "all done"

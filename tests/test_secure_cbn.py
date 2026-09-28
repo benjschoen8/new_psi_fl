@@ -138,6 +138,23 @@ class CBNPipelineTests(unittest.TestCase):
             self.assertEqual({f: f.stat().st_mtime_ns for f in cache.iterdir()}, stamp)     # nothing retrained
             self.assertFalse(list(cache.glob('*.lock')))
 
+    def test_damaged_or_nan_cache_entries_are_set_aside(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache = Path(d, 'cache')
+            clean, _, _ = go(agg='secagg', rounds=1, warmup_epochs=5, generator_cache=cache)
+            files = sorted(cache.glob('generator_*_epochs5_seed3.pt'))
+            files[0].write_bytes(b'not a torch file')                     # interrupted copy
+            st = torch.load(files[1], weights_only=False)
+            k = next(k for k, x in st['gan']['G'].items() if x.is_floating_point())
+            st['gan']['G'][k] = st['gan']['G'][k] * float('nan')          # diverged warm-up
+            torch.save(st, files[1])
+            again, _, _ = go(agg='secagg', rounds=1, warmup_epochs=5, generator_cache=cache,
+                             union_result=clean['union'])
+            self.assertEqual(len(list(cache.glob('*.bad'))), 2)             # both set aside ...
+            self.assertEqual(len(list(cache.glob('generator_*_epochs5_seed3.pt'))), 3)   # ... and re-made
+            np.testing.assert_allclose(again['table'], clean['table'], atol=1e-6)    # same result
+            np.testing.assert_allclose(again['trunk'], clean['trunk'], atol=1e-6)
+
     def test_lock_is_exclusive_and_dead_owner_is_taken_over(self):
         import os
         import socket

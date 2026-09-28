@@ -35,6 +35,7 @@ metrics: experimenter only). This is a single-process simulation of all parties.
 
   python -m secure_code_no_cluster --gen cbn --smoke --rounds 3        # CLI lives there
 """
+import copy
 import hashlib
 import json
 import os
@@ -245,6 +246,20 @@ def data_hash(loader):
     return h.hexdigest()
 
 
+GENERATOR_CACHE_VERSION = 1          # bump when ClientCBNGAN.train changes: old cache entries stop matching
+
+
+def _finite_state(state):
+    """True if every float tensor in a (nested) state dict is finite."""
+    if isinstance(state, dict):
+        return all(_finite_state(v) for v in state.values())
+    if isinstance(state, (list, tuple)):
+        return all(_finite_state(v) for v in state)
+    if torch.is_tensor(state) and state.is_floating_point():
+        return bool(torch.isfinite(state).all())
+    return True
+
+
 def cached_epochs(cache, key, seed):
     """Epoch counts cached for this client key: generator_<key>_epochs<e>_seed<seed>.pt."""
     out = []
@@ -386,6 +401,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             return hashlib.sha256(json.dumps(dict(
                 data=data_hash(c.train_loader), labels=len(names[k_]), config=manifest['config'], trunk=trunk_id,
                 model=str(gan.G) + str(gan.D), seeds=[seed * 100003 + k_, seed * 100003 + k_ + 1],
+                version=GENERATOR_CACHE_VERSION,
                 rng=gan._rng_device.split(':')[0])).encode()).hexdigest()[:16]
 
         def file_of(key, e):
@@ -395,6 +411,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             """Returns the epochs loaded from the cache (0: trained from scratch)."""
             v = local[c.id]
             gan = v['gan']
+            fresh = copy.deepcopy(gan.state_dict())                           # to undo a failed load
             key = key_of(k_, c) if cache else None
             lock = _Lock(cache / f'generator_{key}.lock') if cache else None
             while lock and not lock.acquire():                            # another run trains this client
@@ -403,12 +420,24 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                 time.sleep(10)
             try:
                 have = [e for e in (cached_epochs(cache, key, seed) if cache else []) if e <= warmup_epochs]
-                done = loaded = max(have, default=0)
-                if done:
-                    st = torch.load(file_of(key, done), map_location='cpu', weights_only=False)
-                    gan.load_state_dict(st['gan'])
-                    if st.get('shuffle') is not None and v['shuffle'] is not None:
-                        v['shuffle'].generator.set_state(st['shuffle'])
+                done = 0
+                for e in sorted(have, reverse=True):                     # newest usable entry
+                    f = file_of(key, e)
+                    try:
+                        st = torch.load(f, map_location='cpu', weights_only=False)
+                        if not _finite_state(st['gan']):
+                            raise ValueError('non-finite weights')
+                        gan.load_state_dict(st['gan'])
+                        if st.get('shuffle') is not None and v['shuffle'] is not None:
+                            v['shuffle'].generator.set_state(st['shuffle'])
+                        done = e
+                        break
+                    except Exception as err:                             # damaged: set aside, try older
+                        print(f'[warm-up] {f.name} unusable ({type(err).__name__}: {err}); moved to .bad',
+                              flush=True)
+                        f.replace(f.with_suffix('.bad'))
+                        gan.load_state_dict(fresh)                       # undo a partial load
+                loaded = done
                 epochs = gan.epochs
                 try:
                     while done < warmup_epochs:
@@ -417,7 +446,11 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                         gan.train(v['loader'])
                         done += step
                         if cache:
-                            _save(file_of(key, done), dict(gan=gan.state_dict(), shuffle=shuffle_state(v)))
+                            st = gan.state_dict()
+                            if not _finite_state(st):
+                                raise FloatingPointError(f'client {c.id}: warm-up diverged at epoch {done} '
+                                                         '(non-finite weights); nothing cached')
+                            _save(file_of(key, done), dict(gan=st, shuffle=shuffle_state(v)))
                             lock.refresh()
                 finally:
                     gan.epochs = epochs
