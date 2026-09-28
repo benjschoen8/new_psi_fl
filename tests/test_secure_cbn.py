@@ -155,6 +155,26 @@ class CBNPipelineTests(unittest.TestCase):
             np.testing.assert_allclose(again['table'], clean['table'], atol=1e-6)    # same result
             np.testing.assert_allclose(again['trunk'], clean['trunk'], atol=1e-6)
 
+    def test_heter_classifier_guides_the_generator(self):
+        tiny = lambda cid, k: torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(12, k))
+        with tempfile.TemporaryDirectory() as d:
+            cache = Path(d, 'cache')
+            base, _, _ = go(agg='secagg', rounds=1, warmup_epochs=2, generator_cache=cache)
+            zero, _, _ = go(agg='secagg', rounds=1, warmup_epochs=2, generator_cache=cache, guide_factory=tiny,
+                            guide_weight=0., union_result=base['union'])
+            np.testing.assert_allclose(zero['table'], base['table'], atol=1e-6)   # weight 0 == no guide
+            heter, _, _ = go(agg='secagg', rounds=1, warmup_epochs=2, generator_cache=cache, guide_factory=tiny,
+                             guide_weight=1., union_result=base['union'])
+            self.assertGreater(np.abs(heter['table'] - base['table']).sum(), 0)     # the guide changes G
+            g = heter['setup']['guide']
+            self.assertEqual((g['from_cache'], len(g['architectures'])), (3, 1))   # reused from `zero`
+            self.assertEqual(len(list(cache.glob('classifier_*.pt'))), 3)
+            self.assertEqual(len(list(cache.glob('generator_*_epochs2_seed3.pt'))), 9)   # none / w=0 / w=1
+            first, _, _ = go(agg='secagg', rounds=1, warmup_epochs=2, generator_cache=cache, guide_factory=tiny,
+                             checkpoint_dir=d, union_result=base['union'])
+            with self.assertRaisesRegex(ValueError, 'guide'):
+                go(agg='secagg', rounds=2, warmup_epochs=2, resume=f'{d}/checkpoint_last.pt')   # not heter
+
     def test_lock_is_exclusive_and_dead_owner_is_taken_over(self):
         import os
         import socket

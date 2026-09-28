@@ -260,6 +260,31 @@ def _finite_state(state):
     return True
 
 
+def train_guide(model, loader, epochs, lr, device, seed):
+    """heter: train a client's own classifier on its real local data (own shuffling, so the GAN's data
+    order is untouched); returns its training accuracy in the last epoch."""
+    from torch.utils.data import DataLoader
+    dl = DataLoader(loader.dataset, batch_size=getattr(loader, 'batch_size', None) or 64, shuffle=True,
+                    generator=torch.Generator().manual_seed(seed), num_workers=0)
+    model.to(device).train()
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    hit = n = 0
+    for e in range(epochs):
+        for x, y in dl:
+            if len(x) < 2:
+                continue
+            x, y = x.to(device), y.to(device)
+            out = model(x)
+            logits = out[1] if isinstance(out, tuple) else out
+            loss = torch.nn.functional.cross_entropy(logits, y)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            if e == epochs - 1:
+                hit += int((logits.argmax(1) == y).sum()); n += len(y)
+    return hit / max(n, 1)
+
+
 def cached_epochs(cache, key, seed):
     """Epoch counts cached for this client key: generator_<key>_epochs<e>_seed<seed>.pt."""
     out = []
@@ -323,7 +348,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         save_every=1, keep_all=False, resume=None, seed=0, progress=False, on_resume=None, domain_check=True,
         samples_per_label=16, union_result=None, quantize=True, keep_frac=0.1, quant_scale0=0.05,
         min_holders=2, warmup_epochs=0, union='exact', keywords=None, fuzzy=None, generator_cache=None,
-        cache_every=5):
+        cache_every=5, guide_factory=None, guide_epochs=5, guide_weight=.5):
     """gen_factory(num_rows) -> CBN generator; disc_factory(k) -> local D over k labels.
     agg: 'secagg' (the protocol) or 'plain' (Plain-GeFL, no cryptography).
     union_result: reuse a cbn_union() output (the OPRF indices are random per run).
@@ -340,6 +365,9 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
     (<= warmup_epochs) and trains only the rest, saving every cache_every epochs; runs of the same
     clients (plain / exact / fuzzy, other warm-up lengths, restarts) share it, and a lock file lets
     parallel runs train each client once.
+    guide_factory (heter version): guide_factory(client_id, num_local_labels) -> classifier. Each client
+    first trains it on its real local data for guide_epochs (cached like the generators), freezes it,
+    and adds guide_weight * CE(classifier(G(z, y)), y) to its generator loss. Stays local, never sent.
     union: 'exact' (names, OPRF) or 'fuzzy' (no dictionary: keywords = per client {label: keyword}
     in the client's own words, snapped to public anchor classes; fuzzy overrides params)."""
     if agg not in ('plain', 'secagg'):
@@ -356,6 +384,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                     agg=agg, quantize=quant, keep_frac=keep_frac if quant else 1.0, quant_scale0=quant_scale0,
                     min_holders=min_holders, seed=seed, config=_digest(config), domain_check=domain_check,
                     warmup_epochs=warmup_epochs, clip_feedback=quant, union=union,
+                    guide=dict(epochs=guide_epochs, weight=guide_weight) if guide_factory else None,
                     fuzzy=_digest([keywords, fuzzy]) if union == 'fuzzy' else None)
 
     gen_factory = seeded(gen_factory)                                     # public init
@@ -371,12 +400,76 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             shuffle.generator = torch.Generator().manual_seed(seed * 100003 + k_ + 1)
         local[c.id] = dict(gan=gan, loader=c.train_loader, shuffle=shuffle)
     n_cl = len(clients)
+    _hashes = {}
+    client_hash = lambda k_, c: _hashes.setdefault(k_, data_hash(c.train_loader))
+    guide_summary = None
+    if guide_factory is not None:                                         # heter: local classifiers
+        t = time.perf_counter()
+        gcache = Path(generator_cache) if generator_cache else None
+        if gcache:
+            gcache.mkdir(parents=True, exist_ok=True)
+        lr = config.get('local_lr', 1e-3)
+
+        def build(k_, c):                                                 # in order: seeded init
+            torch.manual_seed(seed * 100003 + k_ + 7)
+            return guide_factory(c.id, len(names[k_]))
+        models = [build(k_, c) for k_, c in enumerate(clients)]
+
+        def guide(k_, c):
+            gseed, model = seed * 100003 + k_ + 7, models[k_]
+            dev = local[c.id]['gan'].device
+            acc, hit = None, False
+            if gcache:
+                key = hashlib.sha256(json.dumps(dict(
+                    data=client_hash(k_, c), arch=str(model), labels=len(names[k_]), epochs=guide_epochs, lr=lr,
+                    seed=gseed, version=GENERATOR_CACHE_VERSION)).encode()).hexdigest()[:16]
+                f = gcache / f'classifier_{key}_epochs{guide_epochs}_seed{seed}.pt'
+                lock = _Lock(gcache / f'classifier_{key}.lock')
+                while not lock.acquire():                                 # another run trains it
+                    if f.exists():
+                        break
+                    time.sleep(10)
+                try:
+                    if f.exists():
+                        try:
+                            st = torch.load(f, map_location='cpu', weights_only=False)
+                            if not _finite_state(st['model']):
+                                raise ValueError('non-finite weights')
+                            model.load_state_dict(st['model'])
+                            acc, hit = st['acc'], True
+                        except Exception as err:
+                            print(f'[heter] {f.name} unusable ({type(err).__name__}: {err}); moved to .bad', flush=True)
+                            f.replace(f.with_suffix('.bad'))
+                    if not hit:
+                        acc = train_guide(model, c.train_loader, guide_epochs, lr, dev, gseed)
+                        _save(f, dict(model=model.state_dict(), acc=acc))
+                finally:
+                    lock.release()
+            else:
+                acc = train_guide(model, c.train_loader, guide_epochs, lr, dev, gseed)
+            local[c.id]['gan'].set_guide(model, guide_weight)
+            size = sum(q.numel() for q in model.parameters()) / 1e6
+            return f'{type(model).__name__} ({size:.2f}M)', acc, hit
+
+        print(f'[heter] {n_cl} client classifiers x {guide_epochs} epochs on real local data '
+              f'(generator loss + {guide_weight} x classifier CE) ...', flush=True)
+        if workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(workers) as pool:
+                got = list(pool.map(lambda kc: guide(*kc), enumerate(clients)))
+        else:
+            got = [guide(k_, c) for k_, c in enumerate(clients)]
+        guide_summary = dict(epochs=guide_epochs, weight=guide_weight, seconds=time.perf_counter() - t,
+                             from_cache=sum(h for _, _, h in got), architectures=sorted({a for a, _, _ in got}),
+                             train_acc={str(c.id): a for c, (_, a, _) in zip(clients, got)})
+        print(f"[heter] classifiers ready: {len(guide_summary['architectures'])} architectures, mean train acc "
+              f"{np.mean([a for _, a, _ in got]):.3f}, {guide_summary['from_cache']}/{n_cl} from cache", flush=True)
     shuffle_state = lambda v: getattr(getattr(v['shuffle'], 'generator', None), 'get_state', lambda: None)()
 
     ck = cs = ev_state = None
     if resume:
         ck = _load(resume)
-        old = {'warmup_epochs': 0, 'clip_feedback': False, 'union': 'exact', 'fuzzy': None,
+        old = {'warmup_epochs': 0, 'clip_feedback': False, 'union': 'exact', 'fuzzy': None, 'guide': None,
                **ck['manifest']}                                          # older checkpoints
         diff = sorted(k for k in manifest if old.get(k) != manifest[k])
         if diff:
@@ -399,9 +492,11 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         def key_of(k_, c):
             gan = local[c.id]['gan']
             return hashlib.sha256(json.dumps(dict(
-                data=data_hash(c.train_loader), labels=len(names[k_]), config=manifest['config'], trunk=trunk_id,
+                data=client_hash(k_, c), labels=len(names[k_]), config=manifest['config'], trunk=trunk_id,
                 model=str(gan.G) + str(gan.D), seeds=[seed * 100003 + k_, seed * 100003 + k_ + 1],
                 version=GENERATOR_CACHE_VERSION,
+                **({'guide': dict(arch=str(gan.guide), epochs=guide_epochs, weight=guide_weight)}
+                   if gan.guide is not None else {}),
                 rng=gan._rng_device.split(':')[0])).encode()).hexdigest()[:16]
 
         def file_of(key, e):
@@ -519,6 +614,8 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             v['gan'].load_global(unflatten(trunk, spec), table[labels])
     if warmup_seconds is not None:
         setup['warmup_seconds'] = warmup_seconds
+    if guide_summary is not None:
+        setup['guide'] = guide_summary
 
     blk = lambda sp: np.concatenate([np.full(int(np.prod(sh)), i) for i, (_, sh, _) in enumerate(sp)])
     bt, br = blk(spec), blk(rspec)                                        # tensor-block id per coordinate

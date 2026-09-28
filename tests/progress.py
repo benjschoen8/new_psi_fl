@@ -39,7 +39,7 @@ def status(run, width):
         text = '' if rows or not log.exists() else log.read_bytes()[-2_000_000:].decode(errors='replace')
         if rows or '[setup] label union ready' in text:
             phase = 'running'                                         # round 1 is being trained
-        elif '[warm-up]' in text:
+        elif '[warm-up]' in text or '[heter]' in text:                # heter: local classifiers first
             phase = 'setup' if _warm_done(text) else 'warm-up'
         else:
             phase = 'setup' if started else 'loading'

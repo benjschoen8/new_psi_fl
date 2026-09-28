@@ -425,6 +425,13 @@ def main():
     p.add_argument('--generator-cache', type=Path, default=Path('data/generator_cache'),
                    help='cbn warm-up: cached client generators (generator_<data hash>_epochs<e>_seed<s>.pt, saved '
                         'every 5 epochs), shared by every run of the same clients')
+    p.add_argument('--heter', action='store_true',
+                   help='cbn, heter version: every client trains its own heterogeneous classifier (nets.'
+                        'get_heterogeneous_model: MLP, CNN, ResNet8/18, MobileNetV2/V3, LeNet, AlexNet, '
+                        'ShuffleNetV2, SqueezeNet by client id) on its real data; it guides its generator')
+    p.add_argument('--guide-epochs', type=int, default=5, help='--heter: classifier training epochs (cached)')
+    p.add_argument('--guide-weight', type=float, default=.5,
+                   help='--heter: generator loss = GAN loss + weight x CE(classifier(G(z, y)), y)')
     p.add_argument('--min-holders', type=int, default=2,
                    help='cbn: a label row is updated only if at least this many clients contributed')
     p.add_argument('--keep-frac', type=float, default=0.1, help='cbn: coordinates uploaded per round (plain and secagg)')
@@ -509,11 +516,17 @@ def main():
                   domain_check=not args.no_domain_check, samples_per_label=args.samples_per_label)
     if args.gen == 'cbn':
         import secure_cbn
+        from nets import MLP, get_heterogeneous_model
+        img = int(config.get('img_size', 32))
+        guide_f = ((lambda cid, k: MLP(3, k, 2)) if args.smoke else                 # smoke images are 2x2
+                   (lambda cid, k: get_heterogeneous_model(cid, 3, k, img)))
         result = secure_cbn.run(clients, spaces, tests, gen_f, disc_f, cls_f, config, dictionary,
                                 quantize=not args.no_quantize, keep_frac=args.keep_frac,
                                 quant_scale0=args.quant_scale0, min_holders=args.min_holders,
                                 warmup_epochs=args.warmup_epochs, generator_cache=args.generator_cache,
-                                union='fuzzy' if args.union == 'fuzzy' else 'exact', keywords=keywords, fuzzy=fuzzy, **common)
+                                union='fuzzy' if args.union == 'fuzzy' else 'exact', keywords=keywords, fuzzy=fuzzy,
+                                guide_factory=guide_f if args.heter else None, guide_epochs=args.guide_epochs,
+                                guide_weight=args.guide_weight, **common)
     else:
         result = run(clients, spaces, tests, gen_f, disc_f, cls_f, config, dictionary, code_dim=code_dim,
                      union=args.union, **common)

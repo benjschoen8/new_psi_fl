@@ -122,6 +122,7 @@ class ClientCBNGAN:
         self.g_opt = torch.optim.Adam(self.G.parameters(), **args)
         self.d_opt = torch.optim.Adam(self.D.parameters(), **args)
         self._ref = None
+        self.guide, self.guide_weight = None, 0.   # heter: frozen local classifier guiding G (set_guide)
         self._rng_device = str(device) if str(device).startswith('cuda') else 'cpu'    # keep cuda:k
         self.rng = torch.Generator(device=self._rng_device)
         if seed is not None:
@@ -159,9 +160,22 @@ class ClientCBNGAN:
                                + bce(self.D(self.G(self._noise(len(x)), y).detach(), y).view(-1, 1), fake))
                 d_loss.backward(); self.d_opt.step()
                 self.g_opt.zero_grad()
-                bce(self.D(self.G(self._noise(len(x)), y), y).view(-1, 1), real).backward()
+                fake_x = self.G(self._noise(len(x)), y)
+                g_loss = bce(self.D(fake_x, y).view(-1, 1), real)
+                if self.guide is not None:                # heter: the client's own classifier must
+                    out = self.guide(fake_x)              # recognise the generated class
+                    g_loss = g_loss + self.guide_weight * nn.functional.cross_entropy(
+                        out[1] if isinstance(out, tuple) else out, y)
+                g_loss.backward()
                 self.g_opt.step()
         return counts
+
+    def set_guide(self, classifier, weight):
+        """Frozen local classifier (never uploaded): G's loss += weight * CE(classifier(G(z, y)), y)."""
+        classifier = classifier.to(self.device).eval()
+        for p in classifier.parameters():
+            p.requires_grad_(False)
+        self.guide, self.guide_weight = classifier, float(weight)
 
     def update(self):
         """-(local - global) for the trunk and for every own row."""
