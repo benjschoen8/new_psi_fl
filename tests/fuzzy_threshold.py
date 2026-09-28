@@ -6,8 +6,8 @@ machine with internet:
                                            # data/encoder/<model>.npz (anchor + keyword embeddings),
                                            # runs/fuzzy_threshold/{report.json, threshold.png}
 Data: every class of MNIST / EMNIST / CIFAR-10 as the bare keyword a client would type
-(rt_descriptions.keyword); one simulated client per (dataset, writer). Default: 3 English writers with
-different wordings ('car' / 'automobile' / 'auto'; words and letters only); --langs en,zh,es,ja,fr,de for 6 languages.
+(rt_descriptions.keyword); one simulated client per (dataset, writer). Default: 2 English writers
+('car' / 'Car', at most two keywords per class; letters as is); --langs en,zh,es,ja,fr,de for 6 languages.
 Score: the protocol's grouping (snap to anchor class, exact union; in the clear, the secure version
 gives the same groups), pairwise MCC over (client, label) instances vs the true class.
 Grid: anchors N (vocabulary prefix) x merge (mutual-NN synonym cosine; 1 = none) x hub (CSLS k; 0 = plain
@@ -48,8 +48,8 @@ def score(g, truth, mask=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--model', default=DEFAULT_MODEL)
-    ap.add_argument('--langs', default='en0,en1,en2',
-                    help=f'en0,en1,en2 = English writers with different wordings; or {",".join(LANGS)}')
+    ap.add_argument('--langs', default='en0,en1',
+                    help=f'en0,en1 = English writers (word / Capitalised word); or {",".join(LANGS)}')
     ap.add_argument('--anchors', default='2000,3000,5000,10000,20000')
     ap.add_argument('--merges', default='1,.9,.7,.5')
     ap.add_argument('--hubs', default='0,5,10,20')

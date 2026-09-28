@@ -404,9 +404,9 @@ def main():
                         '(--fuzzy-langs), snapped locally to public anchor classes by a cross-lingual encoder, then exact union (label_union.fuzzy_union; '
                         'parameters from tests/fuzzy_threshold.py); mpc = clients-only MPC over the dictionary; '
                         'secagg = indicator vectors (Aggregator also learns names and holder counts)')
-    p.add_argument('--fuzzy-langs', default='en0,en1,en2',
-                   help='--union fuzzy: client i writes its label keywords as writer i mod len (en0,en1,en2 = English, '
-                        'different wordings; or en,zh,es,ja,fr,de; rt_descriptions.keyword)')
+    p.add_argument('--fuzzy-langs', default='en0,en1',
+                   help='--union fuzzy: client i writes its label keywords as writer i mod len (en0,en1 = English, '
+                        'word / Capitalised word; or en,zh,es,ja,fr,de; rt_descriptions.keyword)')
     p.add_argument('--code-dim', type=int, default=128)
     p.add_argument('--dictionary', type=Path, help='public dictionary: one canonical label id per line')
     p.add_argument('--devices', help='comma list, e.g. cuda:0,cuda:1 or mps,cpu; clients are spread round-robin')

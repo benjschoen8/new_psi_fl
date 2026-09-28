@@ -108,9 +108,12 @@ def load_anchors(model, n, merge, hub=0):
 
 def normalize(t):
     """Public text normalization before embedding: NFKC, trimmed, a bare numeral spelled out
-    ('3' -> 'three': the encoder does not put numerals next to number words)."""
+    ('3' -> 'three': the encoder does not put numerals next to number words), words lower-cased
+    ('Cat' -> 'cat'); a single letter keeps its case ('A' and 'a' are different classes)."""
     t = unicodedata.normalize('NFKC', str(t)).strip()
-    return NUMBER_WORDS[int(t)] if len(t) == 1 and t.isascii() and t.isdigit() else t
+    if len(t) == 1:
+        return NUMBER_WORDS[int(t)] if t.isascii() and t.isdigit() else t
+    return t.lower()
 
 
 def client_keys(labels, texts, E, A, cls, floor, domains=None, pen=None, skip=()):

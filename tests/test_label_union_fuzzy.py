@@ -68,8 +68,8 @@ class FuzzyAnchorTests(unittest.TestCase):
         self.assertEqual((k(()), k(np.array([0]))), ('anchor:0', 'anchor:1'))
 
     def test_normalize_spells_out_numerals(self):
-        self.assertEqual([normalize(t) for t in ('3', ' ３ ', 'three', '三', 'g', '10')],
-                         ['three', 'three', 'three', '三', 'g', '10'])
+        self.assertEqual([normalize(t) for t in ('3', ' ３ ', 'three', 'Three', 'Cat', '三', 'g', 'G', '10')],
+                         ['three', 'three', 'three', 'three', 'cat', '三', 'g', 'G', '10'])
 
     def test_letters_keep_their_text(self):
         words, A, emb = fake_space(['a'], {'a': ['a']})
