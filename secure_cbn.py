@@ -312,7 +312,8 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
     """gen_factory(num_rows) -> CBN generator; disc_factory(k) -> local D over k labels.
     agg: 'secagg' (the protocol) or 'plain' (Plain-GeFL, no cryptography).
     union_result: reuse a cbn_union() output (the OPRF indices are random per run).
-    quantize / keep_frac / quant_scale0: compressed upload (secagg only).
+    quantize / keep_frac / quant_scale0: compressed upload (both: plain sends the same 8-bit values in
+    the clear, own rows only; quantize=False: plain floats / secagg 64-bit fixed point).
     min_holders: a row is updated only if at least this many clients contributed this round.
     warmup_epochs: BEFORE the label union every client trains its own generator (public trunk + one row
     per LOCAL label) for this many epochs, nothing sent. After the union each client moves its local row a to union
@@ -328,7 +329,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
     in the client's own words, snapped to public anchor classes; fuzzy overrides params)."""
     if agg not in ('plain', 'secagg'):
         raise ValueError('agg must be plain or secagg')
-    quant = agg == 'secagg' and quantize
+    quant = quantize                                                      # plain too: same compression
     if quant and len(clients) > MAX_CLIENTS_16BIT:
         raise ValueError(f'16-bit SecAgg holds sums of at most {MAX_CLIENTS_16BIT} clients; use quantize=False')
     devices = list(devices or [device])
@@ -600,7 +601,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         t = time.perf_counter()                                           # 5. aggregation
         it = compress.keep_index(trunk.size, keep_frac if quant else 1., r, b'cbn-trunk')
         ir = compress.keep_index(P, keep_frac if quant else 1., r, b'cbn-rows')
-        if agg == 'plain':
+        if not quant:                                                     # uncompressed Plain-GeFL
             mt, mr, n = plain_mean(results, U, it, ir)
             up = [4 * sum(g.size for g in u[0].values()) if u else 0 for _, u in results]
             row['bytes'].update(upload=int(sum(up)), upload_payload_per_client=float(np.mean(up)),
@@ -613,10 +614,18 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             blocks = (bt[it], br[ir], len(spec), len(rspec)) if quant else None
             vectors = {cid: encode_update(u[0] if u else {}, U, it, ir, sc_t, sc_r, qrng, not quant, blocks)
                        for cid, u in results}                             # everyone uploads
-            sa = {}
-            total, _ = run_secagg(vectors, threshold=max(2, -(-2 * n_cl // 3)),
-                                  modulus_bits=compress.BITS if quant else 64,
-                                  session=f'cbn-round-{r}'.encode(), workers=workers, stats=sa)
+            if agg == 'secagg':
+                sa = {}
+                total, _ = run_secagg(vectors, threshold=max(2, -(-2 * n_cl // 3)),
+                                      modulus_bits=compress.BITS if quant else 64,
+                                      session=f'cbn-round-{r}'.encode(), workers=workers, stats=sa)
+            else:                                                         # compressed Plain-GeFL: same
+                total = np.sum(np.stack(list(vectors.values())).astype(np.int64), 0) % (1 << compress.BITS)
+                # numbers, sent in the clear: 1 byte per 8-bit value, own rows only (+ 2-byte row ids),
+                # 1 byte per clip-feedback block
+                up = [(it.size if 'T' in u[0] else 0) + sum(ir.size + 2 for k in u[0] if k != 'T')
+                      + len(spec) + len(rspec) if u else 0 for _, u in results]
+                sa = dict(payload_up=int(sum(up)), control_up=0, control_down=0)
             out = decode_update(total, U, it, ir, sc_t, sc_r, not quant, blocks)
             mt, mr, n = out[:3]
             if quant:                                                     # adaptive clipping: each block's

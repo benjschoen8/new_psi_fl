@@ -54,8 +54,8 @@ def plot(runs, labels, out):
                          'ytick.color': INK2, 'text.color': INK, 'axes.titlecolor': INK, 'axes.titleweight': 'bold',
                          'axes.titlesize': 10, 'axes.spines.top': False, 'axes.spines.right': False})
     data = [load(r) for r in runs]
-    fig, ax = plt.subplots(1, 3, figsize=(13, 3.9), facecolor=SURFACE,
-                           gridspec_kw=dict(width_ratios=[1, 1.25, 1], wspace=.42))
+    fig, ax = plt.subplots(1, 3, figsize=(15, 4.2), facecolor=SURFACE,
+                           gridspec_kw=dict(width_ratios=[1, 1.45, 1], wspace=.3))
     for a in ax:
         a.set_facecolor(SURFACE)
         a.grid(color=GRID, linewidth=.8)
@@ -65,29 +65,33 @@ def plot(runs, labels, out):
     for d, lab, c in zip(data, labels, COLORS):
         a.plot(d['rounds'], d['acc'], color=c, linewidth=2, marker='o', markersize=5,
                markeredgecolor=SURFACE, markeredgewidth=1.5, label=lab)
-        a.annotate(f"{d['acc'][-1]:.3f}", (d['rounds'][-1], d['acc'][-1]), xytext=(6, 0),
-                   textcoords='offset points', va='center', color=INK2, fontsize=8)
+    ends = sorted(((d['acc'][-1], d['rounds'][-1], c) for d, c in zip(data, COLORS)), key=lambda e: e[0])
+    gap, prev = .045 * max(max(d['acc']) for d in data), -1.
+    dx = .03 * max(max(d['rounds']) - min(d['rounds']), 1)
+    for acc, rnd, c in ends:                                             # final values, nudged apart
+        y_ = max(acc, prev + gap)
+        a.text(rnd + dx, y_, f'{acc:.3f}', va='center', color=c, fontsize=8, fontweight='bold', clip_on=False)
+        prev = y_
     a.set(title='(a) Global accuracy', xlabel='Round', ylabel='Ground-truth accuracy')
     a.set_xticks(data[0]['rounds'])
     a.set_ylim(bottom=0)
     a.grid(axis='x', visible=False)
 
     a = ax[1]                                                            # (b) time per stage
-    y = np.arange(len(STAGES))
-    h = .8 / len(data)
+    x = np.arange(len(STAGES))
+    w = .8 / len(data)
+    top = max(max(d['seconds'].values()) for d in data)
     for i, (d, lab, c) in enumerate(zip(data, labels, COLORS)):
         v = [d['seconds'][k] for k, _ in STAGES]
-        bars = a.barh(y + (i - (len(data) - 1) / 2) * h, v, height=h - .04, color=c, label=lab,
-                      edgecolor=SURFACE, linewidth=1)
-        for b_, x in zip(bars, v):
-            a.text(x + .8, b_.get_y() + b_.get_height() / 2, f'{x:.1f}', va='center', color=INK2, fontsize=7.5)
-    a.set_yticks(y, [n for _, n in STAGES])
-    a.invert_yaxis()
-    a.set(title='(b) Mean time per round', xlabel='Seconds')
-    a.grid(axis='y', visible=False)
-    a.set_xlim(right=max(max(d['seconds'].values()) for d in data) * 1.18)
-    tot = '   '.join(f"{lab}: {sum(d['seconds'].values()):.0f} s/round" for d, lab in zip(data, labels))
-    a.text(0, -.2, tot, transform=a.transAxes, color=INK2, fontsize=8)
+        bars = a.bar(x + (i - (len(data) - 1) / 2) * w, v, width=w - .04, color=c, label=lab,
+                     edgecolor=SURFACE, linewidth=1)
+        for b_, t in zip(bars, v):
+            a.text(b_.get_x() + b_.get_width() / 2, t + top * .015, f'{t:.0f}' if t >= 10 else f'{t:.1f}',
+                   ha='center', va='bottom', color=INK2, fontsize=7, rotation=90)
+    a.set_xticks(x, [n.replace(' ', '\n', 1) for _, n in STAGES], fontsize=8)
+    a.set(title='(b) Mean time per round', ylabel='Seconds')
+    a.grid(axis='x', visible=False)
+    a.set_ylim(top=top * 1.22)
 
     a = ax[2]                                                            # (c) communication
     groups = ['Upload', 'Download']
@@ -98,15 +102,15 @@ def plot(runs, labels, out):
         bars = a.bar(x + (i - (len(data) - 1) / 2) * w, v, width=w - .04, color=c, label=lab,
                      edgecolor=SURFACE, linewidth=1)
         for b_, raw in zip(bars, [d['upload'], d['download']]):
-            a.text(b_.get_x() + b_.get_width() / 2, b_.get_height(), human(raw), ha='center', va='bottom',
-                   color=INK2, fontsize=7.5)
+            a.text(b_.get_x() + b_.get_width() / 2, b_.get_height() * 1.12, human(raw), ha='center',
+                   va='bottom', color=INK2, fontsize=7, rotation=90)
     a.set_xticks(x, groups)
-    a.set(title='(c) Traffic per client per round', ylabel='MB')
+    a.set_yscale('log')                                                  # kB uploads next to MB downloads
+    lo = min(min(d['upload'], d['download']) for d in data if d['upload'] or d['download']) / 1e6
+    hi = max(max(d['upload'], d['download']) for d in data) / 1e6
+    a.set_ylim(lo / 3, hi * 12)
+    a.set(title='(c) Traffic per client per round', ylabel='MB (log scale)')
     a.grid(axis='x', visible=False)
-    setup = '   '.join(f"{lab} setup: {human(d['setup_up'])} up, {d['setup_s']:.0f} s"
-                       for d, lab in zip(data, labels) if d['setup_up'])
-    if setup:
-        a.text(0, -.2, setup, transform=a.transAxes, color=INK2, fontsize=8)
 
     handles, labs = ax[0].get_legend_handles_labels()
     fig.legend(handles, labs, loc='upper center', ncol=len(labels), frameon=False, bbox_to_anchor=(.5, 1.02))

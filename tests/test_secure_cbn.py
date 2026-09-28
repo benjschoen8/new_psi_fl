@@ -87,7 +87,7 @@ class CBNPipelineTests(unittest.TestCase):
     def test_secagg_uncompressed_equals_plain_gefl(self):
         from tests.test_long_run_safety import recount
         a, spaces, tests = go(agg='secagg', quantize=False)
-        b, _, _ = go(agg='plain', union_result=a['union'])                   # same (random) indices
+        b, _, _ = go(agg='plain', quantize=False, union_result=a['union'])   # same (random) indices
         self.assertTrue(a['evaluator']['union_metrics']['exact'])
         np.testing.assert_allclose(a['trunk'], b['trunk'], atol=5e-4)       # 2^-24 fixed point, float32 casts
         np.testing.assert_allclose(a['table'], b['table'], atol=5e-4)
@@ -277,7 +277,7 @@ class CBNCompressTests(unittest.TestCase):
     def test_quantized_pipeline_bytes_and_kept_coordinates(self):
         from secfl import compress
         q, _, _ = go(agg='secagg', rounds=1, keep_frac=.5, min_holders=1)
-        plain, _, _ = go(agg='plain', rounds=1, min_holders=1, union_result=q['union'])
+        plain, _, _ = go(agg='plain', quantize=False, rounds=1, min_holders=1, union_result=q['union'])
         T0, R0 = init_state(q['union']['U'])
         U, T, P = R0.shape[0], T0.size, R0.shape[1]
         kt, kr = round(T * .5), round(P * .5)
@@ -292,6 +292,21 @@ class CBNCompressTests(unittest.TestCase):
         self.assertGreater(np.abs(q['trunk'][it] - T0[it]).sum(), 0)
         corr = np.corrcoef(q['trunk'][it] - T0[it], plain['trunk'][it] - T0[it])[0, 1]
         self.assertGreater(corr, .5)                                         # same direction, coarser
+
+    def test_compressed_plain_is_the_same_numbers_with_less_traffic(self):
+        q, _, _ = go(agg='secagg', rounds=2, keep_frac=.5, min_holders=1)
+        p, _, _ = go(agg='plain', rounds=2, keep_frac=.5, min_holders=1, union_result=q['union'])
+        np.testing.assert_array_equal(p['trunk'], q['trunk'])              # same 8-bit rounding, same mean
+        np.testing.assert_array_equal(p['table'], q['table'])
+        for a, b in zip(p['history'], q['history']):
+            self.assertEqual(a['clip_feedback'], b['clip_feedback'])
+            self.assertLess(a['bytes']['upload_per_client'], b['bytes']['upload_payload_per_client'] / 2 + 1)
+        T0, R0 = init_state(q['union']['U'])
+        g0 = secure_cbn.seeded(lambda k: TinyCBNGenerator(k, 4, 2))(q['union']['U'])
+        nb = len(secure_cbn.flatten(trunk_state(g0))[1]) + len(secure_cbn.row_spec(g0))
+        kt, kr = round(T0.size * .5), round(R0.shape[1] * .5)
+        rows = sum(len(v) for v in go(agg='plain', rounds=0, union_result=q['union'])[1].values())
+        self.assertEqual(p['history'][0]['bytes']['upload'], 3 * (kt + nb) + rows * (kr + 2))   # 1 B / value
 
     def test_too_many_clients_for_16_bits(self):
         from types import SimpleNamespace

@@ -418,7 +418,8 @@ def main():
     p.add_argument('--fast', action='store_true',
                    help='laptop test: 1 local GAN epoch, 1 classifier epoch, 32 samples/class, 3 rounds '
                         '(--rounds overrides), each client capped at --fast-samples train/test images')
-    p.add_argument('--no-quantize', action='store_true', help='cbn + secagg: 64-bit fixed point, no compression')
+    p.add_argument('--no-quantize', action='store_true',
+                   help='cbn: no compression (plain: float32 in the clear; secagg: 64-bit fixed point)')
     p.add_argument('--warmup-epochs', type=int, default=0,
                    help='cbn: local generator epochs per client before round 1 (nothing uploaded)')
     p.add_argument('--generator-cache', type=Path, default=Path('data/generator_cache'),
@@ -426,8 +427,8 @@ def main():
                         'every 5 epochs), shared by every run of the same clients')
     p.add_argument('--min-holders', type=int, default=2,
                    help='cbn: a label row is updated only if at least this many clients contributed')
-    p.add_argument('--keep-frac', type=float, default=0.1, help='cbn + secagg: coordinates uploaded per round')
-    p.add_argument('--quant-scale0', type=float, default=0.05, help='cbn + secagg: first-round scale floor')
+    p.add_argument('--keep-frac', type=float, default=0.1, help='cbn: coordinates uploaded per round (plain and secagg)')
+    p.add_argument('--quant-scale0', type=float, default=0.05, help='cbn: first-round scale floor (plain and secagg)')
     p.add_argument('--fast-samples', type=int, default=256, help='per-client image cap under --fast')
     args = p.parse_args()
     from setup import resolve_device
