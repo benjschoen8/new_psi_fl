@@ -1,5 +1,6 @@
 """Progress bars for every run of run_experiments.sh (reads the runs' files; never touches them).
-States: loading (reading datasets, building clients) -> setup (label union, round 1) -> running -> done;
+States: loading (reading datasets, building clients) -> warm-up (local generators) -> setup (label union)
+-> running (from round 1 on) -> done;
 stalled? = no new output for 3 rounds + 10 min.
 
   python -m tests.progress                    # once
@@ -35,16 +36,30 @@ def status(run, width):
             if log.exists() else None
         stalled = per is not None and idle is not None and idle > 3 * per + 600
         started = (run / 'args.json').exists()
-        state = 'stalled?' if stalled else ('running' if rows else 'setup' if started else 'loading')
+        text = '' if rows or not log.exists() else log.read_bytes()[-2_000_000:].decode(errors='replace')
+        if rows or '[setup] label union ready' in text:
+            phase = 'running'                                         # round 1 is being trained
+        elif '[warm-up]' in text:
+            phase = 'setup' if _warm_done(text) else 'warm-up'
+        else:
+            phase = 'setup' if started else 'loading'
+        state = 'stalled?' if stalled else phase
         eta = f'ETA {fmt((total - done_rounds) * per)}' if per else ''
     fill = int(width * done_rounds / total) if total else 0
     acc = f"acc {rows[-1]['accuracy']:.4f}" if rows else ''
     line = f"{run.name:<15} [{'#' * fill}{'.' * (width - fill)}] {done_rounds:>3}/{total:<3} {state:<9} {acc:<11} {eta}"
-    if state in ('loading', 'setup') and log.exists():                # show what it is doing
+    if (state in ('loading', 'warm-up', 'setup') or not rows) and log.exists():   # show what it is doing
         tail = [l for l in log.read_bytes()[-4000:].decode(errors='replace').replace('\r', '\n').splitlines() if l.strip()]
         if tail:
             line += f"\n{'':<16}> {tail[-1].strip()[:90]}"
     return line
+
+
+def _warm_done(text):
+    """The last warm-up progress line says n/n clients done (or all came from the cache)."""
+    import re
+    m = re.findall(r'\[warm-up\] (\d+)/(\d+) clients done', text)
+    return bool(m) and m[-1][0] == m[-1][1]
 
 
 def fmt(s):

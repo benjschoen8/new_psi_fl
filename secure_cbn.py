@@ -235,18 +235,95 @@ def fuzzy_union(names, dictionary, ids, keywords, workers=1, samples=None, say=l
 
 
 # ---------------------------------------------------------------------------- run
+def data_hash(loader):
+    """sha256 of every (image, label) the client trains on, in dataset order, as the model sees them."""
+    from torch.utils.data import DataLoader
+    h = hashlib.sha256()
+    for x, y in DataLoader(loader.dataset, batch_size=1024, shuffle=False, num_workers=0):
+        h.update(np.ascontiguousarray(x.numpy(), np.float32).tobytes())
+        h.update(np.ascontiguousarray(y.numpy(), np.int64).tobytes())
+    return h.hexdigest()
+
+
+def cached_epochs(cache, key, seed):
+    """Epoch counts cached for this client key: generator_<key>_epochs<e>_seed<seed>.pt."""
+    out = []
+    for f in Path(cache).glob(f'generator_{key}_epochs*_seed{seed}.pt'):
+        e = f.name[len(f'generator_{key}_epochs'):-len(f'_seed{seed}.pt')]
+        if e.isdigit():
+            out.append(int(e))
+    return sorted(out)
+
+
+class _Lock:
+    """One process trains a client key at a time (parallel runs of the same clients share the work).
+    A lock whose process is gone (same host) or that was not refreshed for `stale` s is taken over."""
+
+    def __init__(self, path, stale=7200):
+        self.path, self.stale, self.mine = Path(path), stale, False
+
+    def acquire(self):
+        import socket
+        while True:
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, f'{socket.gethostname()} {os.getpid()}'.encode())
+                os.close(fd)
+                self.mine = True
+                return True
+            except FileExistsError:
+                if self._stale():
+                    self.path.unlink(missing_ok=True)
+                    continue
+                return False
+
+    def _stale(self):
+        import socket
+        try:
+            host, pid = self.path.read_text().split()
+            age = time.time() - self.path.stat().st_mtime
+        except (OSError, ValueError):
+            return False
+        if host == socket.gethostname():
+            try:
+                os.kill(int(pid), 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                pass
+        return age > self.stale
+
+    def refresh(self):
+        if self.mine:
+            os.utime(self.path)
+
+    def release(self):
+        if self.mine:
+            self.path.unlink(missing_ok=True)
+            self.mine = False
+
+
 def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_factory, config, dictionary,
         agg='secagg', rounds=3, device='cpu', record=None, devices=None, workers=1, checkpoint_dir=None,
         save_every=1, keep_all=False, resume=None, seed=0, progress=False, on_resume=None, domain_check=True,
         samples_per_label=16, union_result=None, quantize=True, keep_frac=0.1, quant_scale0=0.05,
-        min_holders=2, warmup_epochs=0, union='exact', keywords=None, fuzzy=None):
+        min_holders=2, warmup_epochs=0, union='exact', keywords=None, fuzzy=None, generator_cache=None,
+        cache_every=5):
     """gen_factory(num_rows) -> CBN generator; disc_factory(k) -> local D over k labels.
     agg: 'secagg' (the protocol) or 'plain' (Plain-GeFL, no cryptography).
     union_result: reuse a cbn_union() output (the OPRF indices are random per run).
     quantize / keep_frac / quant_scale0: compressed upload (secagg only).
     min_holders: a row is updated only if at least this many clients contributed this round.
-    warmup_epochs: before round 1 every client trains its own generator (trunk + its rows) locally for
-    this many epochs, nothing uploaded; round 1's update then carries the warm-up progress.
+    warmup_epochs: BEFORE the label union every client trains its own generator (public trunk + one row
+    per LOCAL label) for this many epochs, nothing sent. After the union each client moves its local row a to union
+    row index[a] (a relabel: the condition is a row lookup) and measures round 1's update from the
+    public initial state, so round 1 carries the warm-up progress.
+    generator_cache: folder of warmed-up client generators, generator_<key>_epochs<e>_seed<seed>.pt,
+    key = hash of the client's data (every image and label), its label count, the config, the public
+    initial trunk, the model shapes and its random seeds. Each client loads the most epochs cached
+    (<= warmup_epochs) and trains only the rest, saving every cache_every epochs; runs of the same
+    clients (plain / exact / fuzzy, other warm-up lengths, restarts) share it, and a lock file lets
+    parallel runs train each client once.
     union: 'exact' (names, OPRF) or 'fuzzy' (no dictionary: keywords = per client {label: keyword}
     in the client's own words, snapped to public anchor classes; fuzzy overrides params)."""
     if agg not in ('plain', 'secagg'):
@@ -265,6 +342,21 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                     warmup_epochs=warmup_epochs, clip_feedback=quant, union=union,
                     fuzzy=_digest([keywords, fuzzy]) if union == 'fuzzy' else None)
 
+    gen_factory = seeded(gen_factory)                                     # public init
+    trunk, spec = flatten(trunk_state(gen_factory(1)))                    # public trunk, independent of U
+    local = {}
+    for k_, (c, labels) in enumerate(zip(clients, names)):               # own labels, local order
+        dev = devices[k_ % len(devices)]
+        g = gen_factory(len(labels))
+        load_trunk(g, unflatten(trunk, spec))
+        gan = ClientCBNGAN(g, disc_factory(len(labels)), config, dev, seed=seed * 100003 + k_)
+        shuffle = getattr(c.train_loader, 'sampler', None)
+        if hasattr(shuffle, 'generator'):
+            shuffle.generator = torch.Generator().manual_seed(seed * 100003 + k_ + 1)
+        local[c.id] = dict(gan=gan, loader=c.train_loader, shuffle=shuffle)
+    n_cl = len(clients)
+    shuffle_state = lambda v: getattr(getattr(v['shuffle'], 'generator', None), 'get_state', lambda: None)()
+
     ck = cs = ev_state = None
     if resume:
         ck = _load(resume)
@@ -280,7 +372,77 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             raise ValueError('client state and Aggregator state are from different rounds')
         Un = dict(cs['union'], U=ck['U'], pks=ck['pks'], info=ck['union_info'],
                   **ev_state['union'])
-    else:
+    warmed_now, warmup_seconds = False, None
+    if warmup_epochs and not ck:                                          # local warm-up, before the union
+        t = time.perf_counter()
+        trunk_id = hashlib.sha256(trunk.tobytes()).hexdigest()
+        cache = Path(generator_cache) if generator_cache else None
+        if cache:
+            cache.mkdir(parents=True, exist_ok=True)
+
+        def key_of(k_, c):
+            gan = local[c.id]['gan']
+            return hashlib.sha256(json.dumps(dict(
+                data=data_hash(c.train_loader), labels=len(names[k_]), config=manifest['config'], trunk=trunk_id,
+                model=str(gan.G) + str(gan.D), seeds=[seed * 100003 + k_, seed * 100003 + k_ + 1],
+                rng=gan._rng_device.split(':')[0])).encode()).hexdigest()[:16]
+
+        def file_of(key, e):
+            return cache / f'generator_{key}_epochs{e}_seed{seed}.pt'
+
+        def warm(k_, c):
+            """Returns the epochs loaded from the cache (0: trained from scratch)."""
+            v = local[c.id]
+            gan = v['gan']
+            key = key_of(k_, c) if cache else None
+            lock = _Lock(cache / f'generator_{key}.lock') if cache else None
+            while lock and not lock.acquire():                            # another run trains this client
+                if max(cached_epochs(cache, key, seed), default=0) >= warmup_epochs:
+                    break
+                time.sleep(10)
+            try:
+                have = [e for e in (cached_epochs(cache, key, seed) if cache else []) if e <= warmup_epochs]
+                done = loaded = max(have, default=0)
+                if done:
+                    st = torch.load(file_of(key, done), map_location='cpu', weights_only=False)
+                    gan.load_state_dict(st['gan'])
+                    if st.get('shuffle') is not None and v['shuffle'] is not None:
+                        v['shuffle'].generator.set_state(st['shuffle'])
+                epochs = gan.epochs
+                try:
+                    while done < warmup_epochs:
+                        step = min(cache_every - done % cache_every, warmup_epochs - done)
+                        gan.epochs = step
+                        gan.train(v['loader'])
+                        done += step
+                        if cache:
+                            _save(file_of(key, done), dict(gan=gan.state_dict(), shuffle=shuffle_state(v)))
+                            lock.refresh()
+                finally:
+                    gan.epochs = epochs
+                return loaded
+            finally:
+                if lock:
+                    lock.release()
+
+        print(f'[warm-up] {n_cl} clients x {warmup_epochs} local epochs (own labels, before the union)'
+              + (f', cache {cache}' if cache else '') + ' ...', flush=True)
+        reused = 0
+        if workers > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(workers) as pool:
+                futures = [pool.submit(warm, k_, c) for k_, c in enumerate(clients)]
+                for k_, f in enumerate(as_completed(futures), 1):
+                    reused += f.result() == warmup_epochs
+                    print(f'[warm-up] {k_}/{n_cl} clients done', flush=True)
+        else:
+            for k_, c in enumerate(clients):
+                reused += warm(k_, c) == warmup_epochs
+                print(f'[warm-up] {k_ + 1}/{n_cl} clients done', flush=True)
+        if reused:
+            print(f'[warm-up] {reused}/{n_cl} clients fully loaded from the cache', flush=True)
+        warmed_now, warmup_seconds = True, time.perf_counter() - t
+    if not ck:
         samples = ([label_samples(c.train_loader, n, samples_per_label) for c, n in zip(clients, names)]
                    if domain_check and union_result is None else None)
         if union_result is not None:
@@ -293,6 +455,8 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         if agg == 'secagg' and Un['pks'] is None:
             raise ValueError('secagg needs an OPRF union with keys (union_result from cbn_union)')
     U, index = Un['U'], Un['index']
+    print(f"[setup] label union ready: {U} labels ({Un['info'].get('method', '?')}, "
+          f"{Un['info'].get('seconds', 0):.1f}s); round {1 if not ck else ck['round'] + 1} starts", flush=True)
     if progress:
         say(format_union(Un['view']))
     keys = [[idx[x] for x in l] for idx, l in zip(index, names)]
@@ -307,24 +471,20 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             _save(Path(checkpoint_dir) / 'evaluator' / 'union.pt',
                   dict(format=CHECKPOINT_FORMAT + '/evaluator', union=dict(metrics=Un['metrics'], view=Un['view'])))
 
-    gen_factory = seeded(gen_factory)                                     # public init
     g0 = gen_factory(U)
-    trunk, spec = flatten(trunk_state(g0))
     table = rows(g0)                                                      # U x P, public init
     P, rspec = table.shape[1], row_spec(g0)
     var_mask = np.concatenate([np.full(int(np.prod(s)), n.endswith('running_var')) for n, s, _ in spec])
-    local = {}
-    for k_, (c, labels) in enumerate(zip(clients, keys)):
-        dev = devices[k_ % len(devices)]
-        g = gen_factory(len(labels))
-        gan = ClientCBNGAN(g, disc_factory(len(labels)), config, dev, seed=seed * 100003 + k_)
-        gan.load_global(unflatten(trunk, spec), table[labels])
-        shuffle = getattr(c.train_loader, 'sampler', None)
-        if hasattr(shuffle, 'generator'):
-            shuffle.generator = torch.Generator().manual_seed(seed * 100003 + k_ + 1)
-        local[c.id] = dict(gan=gan, loader=c.train_loader, shuffle=shuffle, rows=labels,
-                           slots=[index[k_][x] for x in names[k_]],
-                           sk=None if Un['sks'] is None else {index[k_][x]: Un['sks'][k_][x] for x in names[k_]})
+    for k_, (c, labels) in enumerate(zip(clients, keys)):                # relabel: local a -> union row labels[a]
+        v = local[c.id]
+        v.update(rows=labels, slots=[index[k_][x] for x in names[k_]],
+                 sk=None if Un['sks'] is None else {index[k_][x]: Un['sks'][k_][x] for x in names[k_]})
+        if warmed_now:                                                    # keep the warm-up, update vs global init
+            v['gan'].rebase(trunk, table[labels])
+        else:
+            v['gan'].load_global(unflatten(trunk, spec), table[labels])
+    if warmup_seconds is not None:
+        setup['warmup_seconds'] = warmup_seconds
 
     blk = lambda sp: np.concatenate([np.full(int(np.prod(sh)), i) for i, (_, sh, _) in enumerate(sp)])
     bt, br = blk(spec), blk(rspec)                                        # tensor-block id per coordinate
@@ -373,9 +533,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         _save(d / cfile, dict(                                            # 1. clients' private state
             format=CHECKPOINT_FORMAT + '/clients', round=done, qrng=qrng.bit_generator.state,
             union=dict(index=Un['index'], sks=Un['sks']),
-            clients={cid: dict(v['gan'].state_dict(), shuffle=getattr(getattr(v['shuffle'], 'generator', None),
-                                                                       'get_state', lambda: None)())
-                     for cid, v in local.items()}))
+            clients={cid: dict(v['gan'].state_dict(), shuffle=shuffle_state(v)) for cid, v in local.items()}))
         agg_state = dict(format=CHECKPOINT_FORMAT, round=done, manifest=manifest, clients_file=cfile,
                          trunk=trunk, table=table, U=U, pks=Un['pks'], union_info=Un['info'],
                          scales=(sc_t, sc_r, mult_t, mult_r), history=history, rng=_rng_state(), warmed=warmed or done > 0,
@@ -390,33 +548,9 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                 if old_file.name != Path(cfile).name:
                     old_file.unlink()
 
-    n_cl = len(clients)
-    if warmup_epochs and start == 0 and not (ck and ck.get('warmed')):  # local generator warm-up
-        t = time.perf_counter()
-
-        def warm(c):
-            gan = local[c.id]['gan']
-            epochs, gan.epochs = gan.epochs, warmup_epochs
-            try:
-                gan.train(local[c.id]['loader'])
-            finally:
-                gan.epochs = epochs
-            return c.id
-
-        print(f'[warm-up] {n_cl} clients x {warmup_epochs} local epochs ...', flush=True)
-        if workers > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(workers) as pool:
-                for k_, f in enumerate(as_completed([pool.submit(warm, c) for c in clients]), 1):
-                    f.result()
-                    print(f'[warm-up] {k_}/{n_cl} clients done', flush=True)
-        else:
-            for k_, c in enumerate(clients, 1):
-                warm(c)
-                print(f'[warm-up] {k_}/{n_cl} clients done', flush=True)
-        setup['warmup_seconds'] = time.perf_counter() - t
-        if checkpoint_dir:
-            save_checkpoint(0, warmed=True)                               # a crash in round 1 keeps it
+    if warmed_now and checkpoint_dir:
+        save_checkpoint(0, warmed=True)                                   # a crash in round 1 keeps it
+        write_json(Path(checkpoint_dir) / 'setup.json', setup)
 
     bb = BulletinBoard()
     model = trainer.model

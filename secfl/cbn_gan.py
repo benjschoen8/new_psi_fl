@@ -136,6 +136,11 @@ class ClientCBNGAN:
         set_rows(self.G, own_rows)
         self._ref = (flatten(trunk_state(self.G))[0], rows(self.G))
 
+    def rebase(self, trunk_flat: np.ndarray, own_rows: np.ndarray):
+        """Keep the (pretrained) weights; the next update() is measured from this global state
+        (used after the union: own_rows = the public initial rows of this client's union indices)."""
+        self._ref = (np.asarray(trunk_flat, np.float64).copy(), np.asarray(own_rows, np.float64).copy())
+
     def train(self, loader) -> dict:
         """Returns {local label: samples seen} (first epoch)."""
         bce, counts = nn.BCEWithLogitsLoss(), {}

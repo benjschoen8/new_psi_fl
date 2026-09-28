@@ -25,8 +25,8 @@ def go(**kw):
 
 
 def init_state(U):
-    g0 = secure_cbn.seeded(lambda k: TinyCBNGenerator(k, 4, 2))(U)
-    return secure_cbn.flatten(trunk_state(g0))[0], rows(g0)
+    f = secure_cbn.seeded(lambda k: TinyCBNGenerator(k, 4, 2))
+    return secure_cbn.flatten(trunk_state(f(1)))[0], rows(f(U))          # public trunk does not depend on U
 
 
 class CBNModelTests(unittest.TestCase):
@@ -117,6 +117,40 @@ class CBNPipelineTests(unittest.TestCase):
             np.testing.assert_array_equal(resumed['trunk'], full['trunk'])
             np.testing.assert_array_equal(resumed['table'], full['table'])
             self.assertEqual([h['accuracy'] for h in resumed['history']], [h['accuracy'] for h in full['history']])
+
+    def test_warmup_cache_per_client_every_5_epochs(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache = Path(d, 'cache')
+            fresh7, _, _ = go(agg='secagg', rounds=1, warmup_epochs=7)                    # no cache
+            first, _, _ = go(agg='secagg', rounds=1, warmup_epochs=5, generator_cache=cache,
+                             union_result=fresh7['union'])
+            self.assertEqual(len(list(cache.glob('generator_*_epochs5_seed3.pt'))), 3)     # one per client
+            cont, _, _ = go(agg='secagg', rounds=1, warmup_epochs=7, generator_cache=cache,
+                            union_result=fresh7['union'])                                   # loads 5, trains 2
+            self.assertEqual(len(list(cache.glob('generator_*_epochs7_seed3.pt'))), 3)
+            np.testing.assert_allclose(cont['table'], fresh7['table'], atol=1e-6)          # 5 + 2 == 7
+            np.testing.assert_allclose(cont['trunk'], fresh7['trunk'], atol=1e-6)
+            stamp = {f: f.stat().st_mtime_ns for f in cache.iterdir()}
+            again, _, _ = go(agg='secagg', rounds=1, warmup_epochs=7, generator_cache=cache,
+                             union_result=fresh7['union'])                                  # all from cache
+            np.testing.assert_allclose(again['table'], fresh7['table'], atol=1e-6)
+            go(agg='plain', rounds=1, warmup_epochs=7, generator_cache=cache)               # other union: shared
+            self.assertEqual({f: f.stat().st_mtime_ns for f in cache.iterdir()}, stamp)     # nothing retrained
+            self.assertFalse(list(cache.glob('*.lock')))
+
+    def test_lock_is_exclusive_and_dead_owner_is_taken_over(self):
+        import os
+        import socket
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d, 'k.lock')
+            a, b = secure_cbn._Lock(path), secure_cbn._Lock(path)
+            self.assertTrue(a.acquire())
+            self.assertFalse(b.acquire())                                           # held by a live process
+            a.release()
+            path.write_text(f'{socket.gethostname()} 999999999')                   # owner process is gone
+            self.assertTrue(b.acquire())
+            b.release()
+            self.assertFalse(path.exists())
 
     def test_warmup_moves_round_one_and_resumes(self):
         base, _, _ = go(agg='plain', rounds=1, min_holders=1)
@@ -256,7 +290,8 @@ class CBNCompressTests(unittest.TestCase):
         rest = np.setdiff1d(np.arange(T), it)
         np.testing.assert_array_equal(q['trunk'][rest], T0[rest])            # not uploaded: keep global
         self.assertGreater(np.abs(q['trunk'][it] - T0[it]).sum(), 0)
-        self.assertLess(np.abs(q['trunk'] - plain['trunk']).max(), .5)       # same direction, coarser
+        corr = np.corrcoef(q['trunk'][it] - T0[it], plain['trunk'][it] - T0[it])[0, 1]
+        self.assertGreater(corr, .5)                                         # same direction, coarser
 
     def test_too_many_clients_for_16_bits(self):
         from types import SimpleNamespace

@@ -35,7 +35,7 @@ PARAMS_FILE = Path(__file__).with_name('fuzzy_params.json')
 WORDS_FILE = Path(__file__).with_name('anchor_words.txt')
 FALSE_FRIENDS = Path(__file__).with_name('anchor_false_friends.json')
 NUMBER_WORDS = 'zero one two three four five six seven eight nine'.split()
-DEFAULTS = dict(anchors=20000, merge=.8, floor=.3, hub=0)                 # overridden by fuzzy_params.json
+DEFAULTS = dict(anchors=2000, merge=1.0, floor=0.0, hub=5)   # calibrated (English writers, MCC .991); fuzzy_params.json overrides
 
 
 def params():
