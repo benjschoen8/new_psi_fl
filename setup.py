@@ -124,6 +124,9 @@ def parser():
     for name in ('mnist', 'emnist', 'fashionmnist', 'cifar10', 'cifar100', 'usps'):
         p.add_argument(f'--num-train-{name}', f'--num_train_{name}', type=int,
                        default=10 if name in ('mnist', 'emnist', 'cifar10') else 0)
+    p.add_argument('--class-subsets', metavar='LO,HI',
+                   help='every client of a dataset holds LO..HI of its classes (even coverage, each class '
+                        'split evenly among its holders) and knows only those labels; e.g. 8,20')
     p.add_argument('--noniid-partition', '--noniid_partition', default='dirichlet',
                    choices=('dirichlet', 'noniid_label', 'quantity_skew', 'quantity_skew_equalSize'))
     return p

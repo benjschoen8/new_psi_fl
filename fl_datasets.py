@@ -41,6 +41,48 @@ class LabelPermutedDataset(Dataset):
         permuted_label = self.mapping_dict[int(original_label)]
         return img, permuted_label
 
+class ClassSubsetDataset(Dataset):
+    """A client's view of a dataset restricted to its own classes: labels renumbered 0..k-1 in the
+    order of `classes` (global label ids); `classes` holds their names (setup.label_names reads it)."""
+    def __init__(self, base, classes, names):
+        self.base, self.remap = base, {int(c): i for i, c in enumerate(classes)}
+        self.classes = [names[int(c)] for c in classes]
+
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, idx):
+        img, y = self.base[idx]
+        return img, self.remap[int(y)]
+
+
+def partition_class_subsets(train_labels, test_labels, n_clients, lo, hi, seed, min_holders=2):
+    """Every client draws k in [lo, hi] classes; classes go to the least-covered ones first (random
+    ties), so coverage is even; redrawn until every class has >= min_holders clients (if possible).
+    A class's train / test samples are split evenly at random among its holders.
+    Returns (classes per client (sorted global ids), train idcs, test idcs)."""
+    train_labels, test_labels = np.asarray(train_labels), np.asarray(test_labels)
+    C, rng = int(max(train_labels.max(), test_labels.max())) + 1, np.random.default_rng(seed)
+    for _ in range(1000):
+        ks = rng.integers(lo, hi + 1, n_clients)
+        cover, own = np.zeros(C, int), []
+        for k in ks:
+            order = np.lexsort((rng.random(C), cover))                  # least covered first, random ties
+            mine = np.sort(order[:k])
+            cover[mine] += 1
+            own.append(mine)
+        if cover.min() >= min(min_holders, ks.sum() // C):
+            break
+    tr, te = {i: [] for i in range(n_clients)}, {i: [] for i in range(n_clients)}
+    for c in range(C):
+        holders = [i for i in range(n_clients) if c in own[i]]
+        for labels, out in ((train_labels, tr), (test_labels, te)):
+            idx = rng.permutation(np.flatnonzero(labels == c))
+            for h, part in zip(holders, np.array_split(idx, len(holders))):
+                out[h] += part.tolist()
+    return [m.tolist() for m in own], tr, te
+
+
 def get_split_cache_path(DATA_ROOT, dataset_name, alpha, total_clients, num_new_clients, seed):
     cache_dir = os.path.join(DATA_ROOT, "splits")
     os.makedirs(cache_dir, exist_ok=True)
@@ -242,6 +284,23 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
             args.seed 
         )
 
+        subsets = getattr(args, 'class_subsets', None)
+        if subsets:                                                    # own classes per client (no cache:
+            lo, hi = map(int, subsets.split(','))                      # deterministic from the seed)
+            own, train_idcs, test_idcs = partition_class_subsets(train_labels, test_labels, n_clients, lo, hi,
+                                                                 args.seed)
+            names = list(train_dataset.classes)
+            client_loaders = []
+            for i in range(n_clients):
+                print(f"{i:<6} | {len(train_idcs[i]):<6} | {len(test_idcs[i]):<6} | {len(own[i])} classes: "
+                      f"{[names[c] for c in own[i]]}")
+                client_loaders.append({
+                    'train': DataLoader(Subset(ClassSubsetDataset(train_dataset, own[i], names), train_idcs[i]),
+                                        batch_size=batch_size, shuffle=True, num_workers=0),
+                    'test': DataLoader(Subset(ClassSubsetDataset(test_dataset, own[i], names), test_idcs[i]),
+                                       batch_size=batch_size, shuffle=False, num_workers=0)})
+            all_client_data_loaders[d_name] = client_loaders
+            continue
         if args.noniid_partition in ["noniid_label", "quantity_skew", "quantity_skew_equalSize"]:
             cache_dir = os.path.dirname(cache_path)
             cache_name = f"{d_name}_C{n_clients}_New{args.num_new_clients}_{args.noniid_partition}_alpha{str(dirichlet_alpha).replace('.', 'p')}_seed{args.seed}.json"

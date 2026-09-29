@@ -41,6 +41,9 @@ else
     OUT=${OUT:-runs/base}_$(date +%Y%m%d-%H%M)          # OUT is optional: just a name prefix
 fi
 EXTRA=${EXTRA:-}                   # extra CLI flags for every run, e.g. EXTRA="--smoke" for a dry run
+# clients: one per dataset (MNIST, EMNIST, CIFAR-10); most labels then have one holder, so a row is
+# updated from a single client (--min-holders 1). emnist10_run_experiments.sh sets its own DATA.
+DATA=${DATA:---num-train-mnist 1 --num-train-emnist 1 --num-train-cifar10 1 --min-holders 1}
 PHASES=${PHASES:-1 2 3 4}
 read -r -a GPU_LIST <<< "${GPUS:-}"
 MONITOR=${MONITOR:-auto}
@@ -79,7 +82,7 @@ run() {  # run <name> <rounds> <workers> [cli flags...]
         [[ -n ${RUN_GPU:-} ]] && gpu=(env "CUDA_VISIBLE_DEVICES=$RUN_GPU")
         local warm=()
         (( WARMUP > 0 )) && warm=(--warmup-epochs "$WARMUP")
-        if "${gpu[@]}" $PY -m secure_code_no_cluster "$@" "${warm[@]}" $EXTRA --rounds "$rounds" --device "$DEVICE" --workers "$workers" \
+        if "${gpu[@]}" $PY -m secure_code_no_cluster $DATA "$@" "${warm[@]}" $EXTRA --rounds "$rounds" --device "$DEVICE" --workers "$workers" \
                --no-progress --output "$dir" "${resume[@]}" >> "$log" 2>&1; then
             touch "$dir/DONE"
             say "done  $name in $(( (SECONDS - t0) / 60 )) min"
