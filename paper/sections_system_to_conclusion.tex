@@ -1,0 +1,238 @@
+% ============================================================================
+%  Sections after Preliminaries: System Model -> Conclusion   (IEEEtran, ICC)
+%  Needs: \usepackage{amsmath,amssymb,algorithm,algpseudocode,booktabs,graphicx}
+%  \todo{...} marks numbers to fill in from runs/<...>/figs/*/paper.csv
+%  Suggested macros (put in the preamble):
+%    \newcommand{\todo}[1]{\textcolor{red}{[#1]}}
+%    \newcommand{\Agg}{\mathsf{AGG}}
+% ============================================================================
+
+\section{System Model}
+\label{sec:system}
+
+We consider a federated learning (FL) system with $n$ clients $\mathcal{C}=\{c_1,\dots,c_n\}$ and one
+aggregator $\Agg$ (the server). Client $c_i$ holds a private labelled dataset
+$D_i=\{(x,y)\}$ whose label set $\mathcal{Y}_i$ is \emph{its own}: clients may hold different datasets
+(e.g., MNIST, EMNIST, CIFAR-10), so label sets can overlap ($\mathcal{Y}_i\cap\mathcal{Y}_j\neq\emptyset$),
+be disjoint, and differ in size. Clients may also use heterogeneous classifier architectures, so
+parameter averaging of classifiers (FedAvg) is not possible; instead, following GeFL, clients
+collaboratively train a \emph{conditional generator} $G(z,k)$ and $\Agg$ trains a global classifier
+$F$ on synthetic samples.
+
+A label is identified by a \emph{keyword} typed by its owner. In the \emph{exact} setting all owners of
+a class use the same name; in the \emph{fuzzy} setting owners use their own wording
+(e.g., ``car'' vs.\ ``Car'', or different synonyms), and no shared dictionary exists.
+Let $\mathcal{U}=\bigcup_i \mathcal{Y}_i$ be the union of classes with $U=|\mathcal{U}|$.
+A public bulletin board (BB) relays broadcast messages.
+
+The generator is a class-conditional-BatchNorm (CBN) DCGAN: a shared \emph{trunk} $\theta_T$ and one
+parameter \emph{row} $\theta_k\in\mathbb{R}^{P}$ per class $k$ (label embedding and per-layer
+$\gamma,\beta$; $P=912$). A client holding class $k$ needs only $\theta_T$ and $\theta_k$.
+The goal is to train $\theta_T$, $\{\theta_k\}$ and $F$ such that $F$ classifies all
+classes of all clients, while protecting \emph{which client holds which label}.
+
+\section{Threat Model and Design Goals}
+\label{sec:threat}
+
+All parties are semi-honest (honest-but-curious); $\Agg$ does not collude with clients.
+We require:
+\begin{itemize}
+  \item[\textbf{G1}] \textbf{Label privacy against $\Agg$}: $\Agg$ learns neither the label names nor
+        which client holds which label.
+  \item[\textbf{G2}] \textbf{Label privacy among clients}: a client learns nothing about other clients'
+        labels beyond $U$, and in particular not how many clients hold its own labels.
+  \item[\textbf{G3}] \textbf{Row confidentiality}: only holders of class $k$ obtain $\theta_k$.
+  \item[\textbf{G4}] \textbf{Update confidentiality}: $\Agg$ learns only aggregates of client updates.
+  \item[\textbf{G5}] \textbf{Efficiency}: per-round traffic comparable to non-private FL.
+\end{itemize}
+\emph{Accepted leakage.} $\Agg$ learns $U$, the global model, and, per round, the \emph{number} of
+contributors to each row (never who); this is inherent to taking a per-class mean and is discussed
+in Sec.~\ref{sec:security}.
+
+\section{Proposed Scheme}
+\label{sec:scheme}
+
+Fig.~\ref{fig:overview} \todo{overview figure} shows the protocol. It has a one-time
+\emph{setup} (private label union and key derivation) followed by FL \emph{rounds}
+(label-private downlink, local training, compressed secure aggregation, server training).
+
+\subsection{Private Label Union}
+\label{sec:union}
+
+\emph{Tags.} Each client draws a key share $k_i$; the joint OPRF key $K=\prod_i k_i$ exists nowhere.
+For each own label $x$, $c_i$ sends the blinded point $H(x)\cdot r$ around a ring of clients, each
+multiplying by its share, and finally removes $r$, obtaining the tag $T(x)=H(x)\cdot K$ on
+ristretto255. Equal labels yield equal tags; every hop sees uniformly random group elements, and lists
+are padded to the maximum list size $m$, so no client learns another's label count.
+
+\emph{Union by secure aggregation.} Each client writes, for each tag, a pair
+$(r,\ r\cdot\mathrm{chk}(T))$ with fresh uniform $r\in\mathbb{Z}_{2^{64}}$ into bucket
+$b(T)=\mathrm{SHA\text{-}256}(T)\bmod 2^{20}$ of a vector; the vectors are summed by SecAgg~[Bonawitz].
+Occupied buckets form the union; the index of a label is the rank of its bucket. Because a sum of
+uniform values is uniform, the number of holders is hidden. Bucket collisions are detected by the
+checksum and resolved by re-hashing with a public salt.
+
+\emph{Keys.} Each holder derives $sk_k=\mathrm{KDF}(T)$ and $pk_k=sk_k\cdot B$ locally. $\Agg$ obtains
+$pk_0,\dots,pk_{U-1}$ through a second SecAgg in which every holder of $k$ writes
+$(r,\ r\cdot c_j)$ for the 16-bit chunks $c_j$ of $pk_k$; with $A=\sum r=2^s a'$ ($a'$ odd) the
+chunks are recovered as $c_j=(B_j/2^s)\,a'^{-1}\bmod 2^{64-s}$, while $A$ itself is uniform and
+hides the holder count.
+
+\emph{Fuzzy union (no dictionary).} Without shared names, each client first maps its keyword to a
+canonical key \emph{locally}, using only public data: (i) text normalization (NFKC, lower-case,
+numerals spelled out; single letters keep their case), (ii) embedding by a public cross-lingual
+sentence encoder, (iii) snapping to the nearest word of a public vocabulary (the $N$ most frequent
+English words) under the CSLS score $2\cos(x,a)-r_a$, where $r_a$ is the mean similarity of anchor $a$
+to its $h$ nearest anchors (suppressing ``hub'' words); a client skips anchors that are more frequent
+in its own language than in English (false friends). The anchor identifier then enters the exact
+OPRF union unchanged. Hence fuzzy matching adds \emph{no} leakage: all similarity computation is local
+and against public data. The parameters $(N,h)$ are calibrated once on public class names by the
+Matthews correlation (MCC) of the resulting grouping.
+
+\subsection{Label-Private Downlink}
+In each round $\Agg$ broadcasts $\theta_T$ and, for every index $k$, a KEM ciphertext of $\theta_k$
+under $pk_k$ (DHKEM on ristretto255 + AES-GCM, HPKE-style, AAD = (round, $k$)). Every index receives
+a ciphertext of equal size, so readers cannot count active labels; only holders of $sk_k$ open row $k$.
+
+\subsection{Local Training}
+Client $c_i$ trains its generator (trunk and own rows) against a private local discriminator for $E_g$
+epochs. A client relabels once after setup: its local label $a$ uses row $\mathrm{idx}_i(a)$; because
+conditioning is a row lookup, a generator warmed up locally \emph{before} the union can be remapped
+without retraining (optional warm-up of $E_w$ epochs).
+
+\subsection{Compressed Secure Aggregation}
+Every client uploads one fixed-length vector (zeros where it has nothing, so participation leaks
+nothing):
+\begin{align*}
+  v_i=\big[\,&q(\Delta\theta_T[\mathcal{K}]),\ q(\Delta\theta_0[\mathcal{R}]),\dots,
+  q(\Delta\theta_{U-1}[\mathcal{R}]),\\
+  &\mathbf{1}_{T},\ \mathbf{1}_0,\dots,\mathbf{1}_{U-1},\ \rho_i\,\big],
+\end{align*}
+where $\mathcal{K},\mathcal{R}$ are public per-round random coordinate subsets of fraction
+$\kappa$ (the same for all clients), $q(\cdot)$ is 8-bit stochastic rounding
+$q(u)=\mathrm{round}_{\mathrm{stoch}}(127\,\mathrm{clip}(u/s,-1,1))$ with public per-tensor scales $s$,
+$\mathbf{1}_k$ indicates a contribution to row $k$, and $\rho_i$ are per-tensor clip fractions.
+Since $|q|\le127$, the sum of $n\le258$ clients fits in $\mathbb{Z}_{2^{16}}$, so SecAgg runs with a
+16-bit modulus (2 bytes per coordinate instead of 8). $\Agg$ recovers
+$\sum_i v_i$ and updates
+\[
+  \theta_k \leftarrow \theta_k - \frac{s_k}{127\,n_k}\sum_i q_i(\Delta\theta_k)
+  \quad\text{if } n_k=\textstyle\sum_i \mathbf{1}_k \ge t,
+\]
+i.e., the unbiased mean over contributors, with a minimum of $t$ holders (default $t=2$).
+\emph{Adaptive clipping}: from the aggregated clip fractions $\bar\rho$ (again only a sum), the scale
+of each tensor block is multiplied by $4$ if $\bar\rho>10\%$, by $2$ if $\bar\rho>1\%$ and by $0.9$
+if $\bar\rho<0.1\%$, which keeps clipping near zero without revealing individual updates.
+
+\subsection{Server Training}
+$\Agg$, which holds all rows, samples $G(z,k)$ for every index $k$ and trains the global classifier $F$
+(ResNet-18) for $E_s$ epochs per round. Algorithm~\ref{alg:protocol} summarizes the protocol.
+
+\begin{algorithm}[t]
+\caption{Label-private generative FL}
+\label{alg:protocol}
+\begin{algorithmic}[1]
+\Statex \textbf{Setup} (once)
+\State each $c_i$: (fuzzy only) keyword $\to$ normalize $\to$ embed $\to$ CSLS-snap to public anchor
+\State OPRF ring $\Rightarrow$ tags $T(x)$; SecAgg bucket union $\Rightarrow$ indices $\mathrm{idx}_i$, $U$
+\State $sk_k=\mathrm{KDF}(T)$; SecAgg of $pk_k$ chunks $\Rightarrow$ $\Agg$ learns $pk_0..pk_{U-1}$
+\State (optional) local warm-up $E_w$ epochs; remap local rows to indices
+\For{round $r=1,\dots,R$}
+  \State $\Agg$: broadcast $\theta_T$; post $\mathrm{Enc}_{pk_k}(\theta_k)$ for all $k$
+  \State each $c_i$: open own rows; train $G$ vs.\ local $D$ for $E_g$ epochs
+  \State each $c_i$: $v_i\gets$ keep-$\kappa$, 8-bit quantize, indicators, clip fractions
+  \State $\Agg$: $\sum_i v_i\gets\mathrm{SecAgg}_{2^{16}}(\{v_i\})$; contributor mean if $n_k\ge t$
+  \State $\Agg$: adapt scales; train $F$ on $G(z,k)$ for $E_s$ epochs
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\section{Security Analysis}
+\label{sec:security}
+
+\emph{G1 (Aggregator).} $\Agg$ sees (a) SecAgg sums, (b) public keys, (c) aggregated masked updates.
+In the union, the sum per bucket is uniform in $\mathbb{Z}_{2^{64}}$ whenever at least one client
+occupies it, so $\Agg$ learns only which buckets are occupied, i.e., $U$; bucket positions are
+pseudorandom functions of tags under a key $\Agg$ does not hold, so indices reveal nothing about names.
+$pk_k$ is aggregated with uniform masks, hiding holders and holder counts. Uploads are fixed-length
+dense vectors from every client, so a client's label set is not revealed by its message.
+
+\emph{G2 (clients).} Ring hops see uniformly random group elements (DDH) and padded lists. The union
+output (occupied buckets) reveals $U$ only. Fuzzy matching is local against public data and does not
+change the transcript.
+
+\emph{G3.} Row $k$ is encrypted under $pk_k$ and every index gets an equal-size ciphertext, so
+non-holders learn neither $\theta_k$ nor which rows are in use.
+
+\emph{G4.} By SecAgg, $\Agg$ learns only $\sum_i v_i$. Compression is applied \emph{before} masking and
+the masks are uniform modulo $2^{16}$, so the 16-bit ring hides values exactly as the 64-bit one; the
+public coordinate subsets and scales carry no client information.
+
+\emph{Residual leakage.} $\Agg$ learns $U$ and, per round, $n_k$ for each row, needed to compute the
+mean; it never learns which clients contributed. Hiding $n_k$ as well (e.g., dividing inside
+MPC/VOLE or HE) is left to future work; we note that clients do \emph{not} learn $n_k$.
+
+\section{Complexity and Communication}
+\label{sec:cost}
+\emph{Setup.} The ring OPRF costs $n\cdot m$ group operations and $n\,m\cdot 32$ bytes per client; the
+bucket union is one SecAgg over $2^{20}$ words; key aggregation is one SecAgg over $17U$ words.
+The fuzzy mapping adds only local encoder inference.
+\emph{Per round.} Upload per client is $2\big(\kappa|\theta_T| + U(\kappa P+1) + 1 + B\big)$ bytes
+plus SecAgg control traffic ($B$: number of tensor blocks), versus $4(|\theta_T|+|\mathcal{Y}_i|P)$
+bytes for uncompressed plaintext FL. The download is $|\theta_T|$ plus $U$ ciphertexts of size
+$4P$+overhead.
+
+\section{Performance Evaluation}
+\label{sec:eval}
+
+\subsection{Setup}
+We use $n=30$ clients: 10 each with MNIST, EMNIST (byclass, 62 classes) and CIFAR-10
+($U=72$ classes; digits of MNIST and EMNIST are the same classes). Data are split by a Dirichlet
+distribution with $\alpha=0.1$ (non-IID) and $\alpha=100$ (IID), seed 15698. The generator is a
+CBN-DCGAN ($32\times32$), the local discriminator is a DCGAN discriminator, and the server classifier is
+ResNet-18. Per round: $E_g=5$ generator epochs, $E_s=5$ server epochs on 64 synthetic samples per class;
+Adam ($2\times10^{-4}$ for the GAN, $10^{-3}$ for $F$); $R=\todo{50}$ rounds, $E_w=\todo{5}$
+warm-up epochs, $t=2$, $\kappa=\todo{1.0 / 0.1}$.
+Fuzzy setting: two writers per class using different keyword forms; public encoder
+\texttt{paraphrase-multilingual-MiniLM-L12-v2}, $N=\todo{2000}$ anchors, CSLS $h=\todo{5}$.
+
+\emph{Baselines.} \textbf{Plain-GeFL}: the same model and update rule without cryptography (plaintext
+union by name, rows sent in the clear, identical 8-bit compression, only own rows uploaded).
+\textbf{Ours (exact PSI)} and \textbf{Ours (fuzzy PSI)}: the proposed protocol with the exact and
+fuzzy union.
+
+\subsection{Label Union}
+The exact union recovers all $U=72$ classes. The fuzzy union reaches MCC $=\todo{1.000}$ (precision
+$\todo{1.000}$, recall $\todo{1.000}$) against the true classes, i.e., it reproduces the exact
+grouping without any shared dictionary; setup takes \todo{83}\,s for 30 clients.
+
+\subsection{Accuracy}
+Fig.~\ref{fig:results}(a) shows global accuracy per round. Ours (exact and fuzzy) matches Plain-GeFL
+\todo{within X points}: since compression is identical and the aggregate is the same, the protocol
+changes \emph{who learns what}, not the model update. Because the PSI-based union does not depend on
+trained models, training on the shared label space starts at round~1, unlike classifier-based
+label mapping, which must first train generators and classifiers (e.g., 25 rounds).
+
+\subsection{Cost}
+Fig.~\ref{fig:results}(b)--(c) report time per stage and traffic per client and round. With
+$\kappa=\todo{0.1}$, the upload is \todo{270\,kB} per client and round versus \todo{5.0\,MB} for
+uncompressed plaintext FL; the cryptographic overhead is dominated by SecAgg (\todo{s}/round), and
+the one-time setup costs \todo{17\,MB} upload per client.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figs/paper.pdf}
+  \caption{(a) Global accuracy per round; (b) mean time per round by stage; (c) traffic per client and
+  round (log scale). Plain-GeFL, Ours (exact PSI), Ours (fuzzy PSI); non-IID ($\alpha=0.1$).}
+  \label{fig:results}
+\end{figure*}
+
+\section{Conclusion}
+\label{sec:conclusion}
+We presented a label-private generative FL protocol for clients with heterogeneous datasets and
+models. A multi-party OPRF with a SecAgg bucket union aligns labels without revealing names, holders or
+holder counts; a fuzzy variant aligns differently worded labels by local mapping to public anchors, at
+no extra leakage. A CBN generator with KEM-sealed rows keeps each class's parameters with its holders,
+and compressed 16-bit secure aggregation keeps the per-round traffic close to non-private FL while
+matching its accuracy. Future work includes hiding per-row contributor counts from the aggregator
+and extending fuzzy matching to multilingual and synonym-rich label vocabularies.

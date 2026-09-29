@@ -432,6 +432,9 @@ def main():
     p.add_argument('--guide-epochs', type=int, default=5, help='--heter: classifier training epochs (cached)')
     p.add_argument('--guide-weight', type=float, default=.5,
                    help='--heter: generator loss = GAN loss + weight x CE(classifier(G(z, y)), y)')
+    p.add_argument('--per-label-gen', action='store_true',
+                   help='cbn: one whole generator per label (no shared trunk) instead of trunk + CBN rows')
+    p.add_argument('--gen-widths', default='64,32,16', help='--per-label-gen: DCGAN widths of each label generator')
     p.add_argument('--min-holders', type=int, default=2,
                    help='cbn: a label row is updated only if at least this many clients contributed')
     p.add_argument('--keep-frac', type=float, default=0.1, help='cbn: coordinates uploaded per round (plain and secagg)')
@@ -456,6 +459,9 @@ def main():
         if args.gen == 'cbn':
             from secfl.cbn_gan import TinyCBNGenerator
             gen_f = lambda k: TinyCBNGenerator(k, 4, 2)
+            if args.per_label_gen:
+                from secfl.cbn_gan import PerLabelGenerator, TinyTemplate
+                gen_f = lambda k: PerLabelGenerator(k, TinyTemplate(4))
     else:
         from nets import DCGANDiscriminator
         from secfl.code_gan import CodeDCGANGenerator
@@ -475,6 +481,10 @@ def main():
         if args.gen == 'cbn':
             from secfl.cbn_gan import CBNGenerator
             gen_f = lambda k: CBNGenerator(k, nd)
+            if args.per_label_gen:
+                from secfl.cbn_gan import DCGANTemplate, PerLabelGenerator
+                widths = tuple(int(w) for w in args.gen_widths.split(','))
+                gen_f = lambda k: PerLabelGenerator(k, DCGANTemplate(nd, 3, widths))
     if args.gen == 'cbn' and args.union not in ('oprf', 'fuzzy'):
         raise SystemExit('--gen cbn needs --union oprf or fuzzy (the KEM keys come from the union)')
     if args.union == 'fuzzy' and args.gen != 'cbn':

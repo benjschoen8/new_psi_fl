@@ -56,11 +56,23 @@ EN_WORDS = {"airplane": "airplane", "automobile": "car", "bird": "bird", "cat": 
             "dog": "dog", "frog": "frog", "horse": "horse", "ship": "ship", "truck": "truck"}
 
 
+# test-only synonym writers (tests.fuzzy_topk): 'syn0' / 'syn1' / 'syn2' name a class in different words
+SYNONYMS = {"airplane": ["airplane", "plane", "aircraft"], "automobile": ["car", "automobile", "auto"],
+            "bird": ["bird", "birds", "songbird"], "cat": ["cat", "kitty", "feline"],
+            "deer": ["deer", "stag", "deer"], "dog": ["dog", "puppy", "canine"],
+            "frog": ["frog", "toad", "frogs"], "horse": ["horse", "pony", "stallion"],
+            "ship": ["ship", "boat", "vessel"], "truck": ["truck", "lorry", "pickup"]}
+
+
 def keyword(dataset, name, lang):
     """The bare word a client types for its label (fuzzy union): 'three', 'tres', '三', 'gato', 'g'.
     lang 'en0' / 'en1': English writers, at most two keywords per class: the plain word and the
     capitalised word ('car' / 'Car', 'three' / 'Three'); letters as is ('A' and 'a' stay different)."""
     name = str(name)
+    if lang[:3] == "syn" and lang[3:].isdigit():
+        if name.isdigit() and len(name) == 1:
+            return DIGIT["en"][int(name)]
+        return SYNONYMS[name][int(lang[3:]) % 3] if name in SYNONYMS else name
     if lang[:2] == "en" and lang[2:].isdigit():
         word = (DIGIT["en"][int(name)] if name.isdigit() and len(name) == 1 else EN_WORDS.get(name, name))
         if len(word) == 1:                                        # a letter: case is the class

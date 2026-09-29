@@ -74,6 +74,98 @@ class TinyCBNGenerator(nn.Module):
         return torch.tanh(self.out(torch.relu(h))).reshape(-1, 3, 2, 2)
 
 
+class PerLabelGenerator(nn.Module):
+    """One whole generator per label (no shared weights): row k = every parameter of label k's own
+    copy of `template` (flattened into emb.weight[k], so rows()/set_rows()/KEM/SecAgg treat it as a
+    CBN row). All rows start from the same template init, so a client's local rows equal the public
+    initial rows of any union index. BatchNorm uses batch statistics (no running stats to share).
+    The trunk is one unused buffer: nothing is shared between labels."""
+
+    def __init__(self, num_labels, template):
+        super().__init__()
+        self.noise_dim = template.noise_dim
+        self._t = [template]                                   # not a submodule: its weights live in the rows
+        self._shapes = [(n, p.shape) for n, p in template.named_parameters()]
+        flat = torch.cat([p.detach().reshape(-1) for p in template.parameters()])
+        self.emb = nn.Embedding(num_labels, flat.numel())
+        with torch.no_grad():
+            self.emb.weight.copy_(flat.expand(num_labels, -1))
+        self.trunk = nn.Module()
+        self.trunk.register_buffer('unused', torch.zeros(1))  # ponytail: keeps the trunk path non-empty
+
+    def extra_repr(self):
+        return f'template={self._t[0]}'
+
+    def forward(self, z, y):
+        if isinstance(self._t[0], DCGANTemplate) and len(y.unique()) > 4:   # few labels: the loop is cheaper
+            return self._dcgan(z, y)
+        from torch.func import functional_call
+        out = None
+        for k in y.unique():                                   # ponytail: one pass per label in the batch
+            m = y == k
+            parts = self.emb.weight[k].split([s.numel() for _, s in self._shapes])
+            o = functional_call(self._t[0], {n: p.view(s) for (n, s), p in zip(self._shapes, parts)}, (z[m],))
+            if out is None:
+                out = o.new_empty((len(z),) + o.shape[1:])
+            out[m] = o
+        return out
+
+    def _dcgan(self, z, y):
+        """Same function as the loop, whole batch at once: every sample's own weights (its label's row),
+        grouped transposed convolutions (groups = batch), BatchNorm statistics per label group."""
+        F = nn.functional
+        B, inv = len(z), y.unique(return_inverse=True)[1]
+        cnt = torch.bincount(inv).to(z.dtype)[:, None]
+        parts = dict(zip([n for n, _ in self._shapes],
+                         self.emb.weight[y].split([s.numel() for _, s in self._shapes], 1)))
+        x, mods = z.view(B, -1, 1, 1), list(self._t[0].net)
+        for i, m in enumerate(mods):
+            if isinstance(m, nn.ConvTranspose2d):
+                cin, cout = m.in_channels, m.out_channels
+                w = parts[f'net.{i}.weight'].reshape(B * cin, cout, *m.kernel_size)
+                x = F.conv_transpose2d(x.reshape(1, B * cin, *x.shape[2:]), w, stride=m.stride,
+                                       padding=m.padding, groups=B)
+                x = x.view(B, cout, *x.shape[2:])
+            elif isinstance(m, nn.BatchNorm2d):                   # batch stats over each label's samples
+                s1 = torch.zeros(len(cnt), x.size(1), dtype=x.dtype, device=x.device).index_add_(0, inv, x.mean((2, 3)))
+                s2 = torch.zeros_like(s1).index_add_(0, inv, (x * x).mean((2, 3)))
+                mean = (s1 / cnt)[inv]
+                var = ((s2 / cnt)[inv] - mean * mean).clamp_min(0)
+                x = ((x - mean[..., None, None]) * torch.rsqrt(var + m.eps)[..., None, None]
+                     * parts[f'net.{i}.weight'][..., None, None] + parts[f'net.{i}.bias'][..., None, None])
+            else:
+                x = m(x)
+        return x
+
+
+class DCGANTemplate(nn.Module):
+    """32x32 DCGAN generator for PerLabelGenerator (unconditional, batch-stat BatchNorm)."""
+
+    def __init__(self, noise_dim=128, channels=3, widths=(64, 32, 16)):
+        super().__init__()
+        self.noise_dim, layers, c = noise_dim, [], noise_dim
+        for i, w in enumerate(widths):
+            layers += [nn.ConvTranspose2d(c, w, 4, 1 if i == 0 else 2, 0 if i == 0 else 1, bias=False),
+                       nn.BatchNorm2d(w, track_running_stats=False), nn.ReLU()]
+            c = w
+        self.net = nn.Sequential(*layers, nn.ConvTranspose2d(c, channels, 4, 2, 1, bias=False), nn.Tanh())
+
+    def forward(self, z):
+        return self.net(z.view(z.size(0), -1, 1, 1))
+
+
+class TinyTemplate(nn.Module):
+    """Smoke-test size: 2x2 RGB images."""
+
+    def __init__(self, noise_dim=4):
+        super().__init__()
+        self.noise_dim = noise_dim
+        self.net = nn.Sequential(nn.Linear(noise_dim, 8), nn.ReLU(), nn.Linear(8, 12), nn.Tanh())
+
+    def forward(self, z):
+        return self.net(z).reshape(-1, 3, 2, 2)
+
+
 def _is_row(name):
     return name.split('.')[-2] in ('emb', 'gamma', 'beta') and name.endswith('weight')
 

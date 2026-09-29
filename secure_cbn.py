@@ -643,6 +643,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             trainer.optimizer.load_state_dict(ck['trainer']['optimizer'])
             trainer._mapping = ck['trainer']['mapping']
         _set_rng_state(ck['rng'])
+    sent = (ck['sent'] if ck and 'sent' in ck else table).copy()      # the rows as clients hold them
     if workers > 1 and all(str(d) == 'cpu' for d in devices):
         torch.set_num_threads(max(1, (os.cpu_count() or 1) // workers))
 
@@ -666,7 +667,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             union=dict(index=Un['index'], sks=Un['sks']),
             clients={cid: dict(v['gan'].state_dict(), shuffle=shuffle_state(v)) for cid, v in local.items()}))
         agg_state = dict(format=CHECKPOINT_FORMAT, round=done, manifest=manifest, clients_file=cfile,
-                         trunk=trunk, table=table, U=U, pks=Un['pks'], union_info=Un['info'],
+                         trunk=trunk, table=table, sent=sent, U=U, pks=Un['pks'], union_info=Un['info'],
                          scales=(sc_t, sc_r, mult_t, mult_r), history=history, rng=_rng_state(), warmed=warmed or done > 0,
                          trainer=None if trainer.model is None else dict(
                              model=trainer.model.state_dict(), optimizer=trainer.optimizer.state_dict(),
@@ -693,22 +694,35 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             from secfl.broadcast import pack_state
             blob = pack_state(unflatten(trunk, spec))
             bb.post('aggregator', f'trunk/{r}', hashlib.sha256(blob).digest())
+            if quant:                                                     # 8-bit downlink: every row's change
+                d = table - sent                                          # since the copy clients hold, per-row
+                sc = (np.maximum(np.abs(d).max(1), 1e-30) / 127).astype(np.float32).astype(np.float64)   # scale
+                q = np.round(d / sc[:, None]).astype(np.int8)
+                sent = (sent + q * sc[:, None]).astype(np.float32).astype(np.float64)   # = what clients rebuild;
+                payload = {g: {'q': np.concatenate([q[g].view(np.uint8), np.float32([sc[g]]).view(np.uint8)])}
+                           for g in range(U)}                             # int8 row + float32 scale; rounding error is
+            else:                                                         # carried into the next round's delta
+                sent, payload = table, {g: {'row': table[g]} for g in range(U)}
             if agg == 'secagg':
                 board = BulletinBoard()                                   # this round's KEM posts only
-                kem.post_generators(board, Un['pks'], r, {g: {'row': table[g]} for g in range(U)})
+                kem.post_generators(board, Un['pks'], r, payload)
                 board_bytes = sum(len(e.payload) for e in board.read())
                 row['bytes']['broadcast'] = len(blob) + board_bytes       # one copy
                 row['bytes']['download_per_client'] = float(len(blob) + board_bytes)   # everyone reads all
                 for c in clients:
-                    got = kem.fetch_generators(board, local[c.id]['sk'], Un['pks'], r)
-                    local[c.id]['gan'].load_global(unflatten(trunk, spec),
-                                                   np.stack([got[s]['row'] for s in local[c.id]['slots']]))
-            else:
-                row['bytes']['broadcast'] = len(blob) + table.astype(np.float32).nbytes
+                    got, v = kem.fetch_generators(board, local[c.id]['sk'], Un['pks'], r), local[c.id]
+                    held = v['gan']._ref[1]                               # own rows of the last round
+                    rb = lambda x: x[:-4].view(np.int8) * np.float64(x[-4:].view(np.float32)[0])
+                    own = [(held[a] + rb(got[s]['q'])).astype(np.float32) if quant
+                           else got[s]['row'] for a, s in enumerate(v['slots'])]
+                    v['gan'].load_global(unflatten(trunk, spec), np.stack(own).astype(np.float64))
+            else:                                                         # own rows only, same numbers in the clear
+                per_row = P + 4 if quant else P * 4
+                row['bytes']['broadcast'] = len(blob) + U * per_row
                 row['bytes']['download_per_client'] = float(len(blob) + np.mean(
-                    [len(local[c.id]['rows']) * P * 4 for c in clients]))
+                    [len(local[c.id]['rows']) * per_row for c in clients]))
                 for c in clients:
-                    local[c.id]['gan'].load_global(unflatten(trunk, spec), table[local[c.id]['rows']])
+                    local[c.id]['gan'].load_global(unflatten(trunk, spec), sent[local[c.id]['rows']])
         row['seconds']['downlink'] = time.perf_counter() - t
 
         t = time.perf_counter()                                           # 4. local training
@@ -801,4 +815,4 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             row['seconds']['checkpoint'] = time.perf_counter() - t
     bar.close()
     setup.update(trunk_params=int(trunk.size), row_params=int(P), resumed_from=start)
-    return dict(history=history, setup=setup, evaluator=evaluator, model=model, trunk=trunk, table=table, union=Un)
+    return dict(history=history, setup=setup, evaluator=evaluator, model=model, trunk=trunk, table=table, sent=sent, union=Un)

@@ -61,6 +61,58 @@ class CBNModelTests(unittest.TestCase):
         self.assertGreater(np.abs(dt).sum(), 0)                              # the shared trunk moves
 
 
+class PerLabelGeneratorTests(unittest.TestCase):
+    def test_one_generator_per_label_nothing_shared(self):
+        from torch.utils.data import DataLoader, TensorDataset
+        from secfl.cbn_gan import DCGANTemplate, PerLabelGenerator, TinyTemplate
+        big = PerLabelGenerator(4, DCGANTemplate(128, 3, (64, 32, 16)))
+        self.assertEqual(rows(big).shape, (4, 172800 + 2 * (64 + 32 + 16)))      # conv + BN affine per label
+        self.assertEqual(big(torch.randn(3, 128), torch.tensor([0, 3, 0])).shape, (3, 3, 32, 32))
+        torch.manual_seed(0)
+        g = PerLabelGenerator(3, TinyTemplate(4))
+        self.assertTrue((rows(g) == rows(g)[0]).all())                       # same public init for every label
+        z, y = torch.randn(5, 4), torch.tensor([2, 0, 2, 1, 0])
+        from torch.func import functional_call
+        t, sh = g._t[0], g._shapes
+        solo = functional_call(t, {n: p.view(s) for (n, s), p in zip(sh, g.emb.weight[2].split([s.numel() for _, s in sh]))}, (z[[0, 2]],))
+        torch.testing.assert_close(g(z, y)[[0, 2]], solo)                    # label 2 = its own generator
+        gan = ClientCBNGAN(g, TinyLocalDiscriminator(3), dict(gen_noise_dim=4), seed=0)
+        gan.load_global(trunk_state(g), rows(g))
+        gan.train(DataLoader(TensorDataset(torch.rand(8, 3, 2, 2) * 2 - 1, torch.full((8,), 1)), batch_size=4))
+        dt, dr = gan.update()
+        np.testing.assert_array_equal(dt, 0)                                 # no shared weights
+        np.testing.assert_array_equal(dr[[0, 2]], 0)
+        self.assertGreater(np.abs(dr[1]).sum(), 0)
+
+    def test_batched_forward_equals_one_generator_per_label(self):
+        from secfl.cbn_gan import DCGANTemplate, PerLabelGenerator
+        torch.manual_seed(0)
+        g = PerLabelGenerator(9, DCGANTemplate(8, 3, (8, 4, 4)))
+        with torch.no_grad():
+            g.emb.weight.add_(.05 * torch.randn_like(g.emb.weight))           # rows differ
+        z, y = torch.randn(20, 8), torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 8] * 2)
+        y[0] = 8                                                            # uneven groups
+        fast = g._dcgan(z, y)
+        out = torch.empty_like(fast)
+        for k in y.unique():                                                # <= 4 labels: loop path
+            m = y == k
+            out[m] = g(z[m], y[m])
+        torch.testing.assert_close(fast, out, atol=1e-5, rtol=1e-4)
+        ga = torch.autograd.grad(fast.square().sum(), g.emb.weight)[0]
+        gb = torch.autograd.grad(sum(g(z[y == k], y[y == k]).square().sum() for k in y.unique()), g.emb.weight)[0]
+        torch.testing.assert_close(ga, gb, atol=1e-4, rtol=1e-3)            # float32 rounding
+
+    def test_pipeline_runs(self):
+        from secfl.cbn_gan import PerLabelGenerator, TinyTemplate
+        torch.manual_seed(7); np.random.seed(7)
+        clients, spaces, tests = build_synthetic(CONFIG)
+        res = secure_cbn.run(clients, spaces, tests, lambda k: PerLabelGenerator(k, TinyTemplate(4)),
+                             TinyLocalDiscriminator, TinyClassifier, CONFIG, DICTIONARY, agg='secagg', rounds=2,
+                             seed=3, domain_check=False)
+        self.assertEqual(res['table'].shape, (3, 148))
+        self.assertTrue(res['evaluator']['union_metrics']['exact'])
+
+
 class CBNPipelineTests(unittest.TestCase):
     def test_clients_hold_only_their_rows_and_kem_blocks_others(self):
         from secfl import kem
@@ -344,6 +396,16 @@ class CBNCompressTests(unittest.TestCase):
         kt, kr = round(T0.size * .5), round(R0.shape[1] * .5)
         rows = sum(len(v) for v in go(agg='plain', rounds=0, union_result=q['union'])[1].values())
         self.assertEqual(p['history'][0]['bytes']['upload'], 3 * (kt + nb) + rows * (kr + 2))   # 1 B / value
+
+    def test_downlink_is_8bit_change_and_clients_rebuild_it(self):
+        q, _, _ = go(agg='secagg', rounds=3, min_holders=1)
+        f, _, _ = go(agg='secagg', rounds=3, min_holders=1, quantize=False, union_result=q['union'])
+        p, _, _ = go(agg='plain', rounds=3, min_holders=1, union_result=q['union'])
+        np.testing.assert_array_equal(p['table'], q['table'])              # KEM clients rebuilt exactly `sent`
+        step = np.abs(q['table'] - q['sent']).max(1)                        # sent trails the table by one
+        self.assertTrue((step > 0).any())                                   # round's 8-bit rounding at most
+        for a, b in zip(q['history'][1:], f['history'][1:]):                # KEM rows: 1 B + 4 B scale vs 8 B
+            self.assertLess(a['bytes']['broadcast'], b['bytes']['broadcast'])  # per value (same trunk blob)
 
     def test_too_many_clients_for_16_bits(self):
         from types import SimpleNamespace
