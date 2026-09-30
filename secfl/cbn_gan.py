@@ -9,6 +9,9 @@ gradients only from samples of that label, so "only update what belongs to one l
 the rows; the trunk is shared (it learns from every label). The Aggregator's generator holds all
 U rows. Rows travel to clients by KEM (secure_cbn), so a client without label D never gets row D.
 """
+import threading
+from contextlib import contextmanager, nullcontext
+
 import numpy as np
 import torch
 from torch import nn
@@ -16,6 +19,46 @@ from torch import nn
 from .settle import flatten, unflatten
 
 ROW_KEYS = ('emb', 'gamma', 'beta')
+
+
+class _RWLock:
+    """Client threads share the GPU; a CUDA-graph capture must not see other threads' CUDA calls.
+    Training steps take the shared side, a capture the exclusive side (once per client)."""
+
+    def __init__(self):
+        self._c, self._readers, self._writer, self._waiting = threading.Condition(), 0, False, 0
+
+    @contextmanager
+    def read(self):
+        with self._c:
+            while self._writer or self._waiting:
+                self._c.wait()
+            self._readers += 1
+        try:
+            yield
+        finally:
+            with self._c:
+                self._readers -= 1
+                self._c.notify_all()
+
+    @contextmanager
+    def write(self):
+        with self._c:
+            self._waiting += 1
+            while self._writer or self._readers:
+                self._c.wait()
+            self._waiting -= 1
+            self._writer = True
+        try:
+            yield
+        finally:
+            with self._c:
+                self._writer = False
+                self._c.notify_all()
+
+
+_GPU = _RWLock()
+GRAPH_WARMUP = 3                                  # eager steps (side stream) before a capture
 
 
 class CondBN(nn.Module):
@@ -97,8 +140,8 @@ class PerLabelGenerator(nn.Module):
         return f'template={self._t[0]}'
 
     def forward(self, z, y):
-        if isinstance(self._t[0], DCGANTemplate) and len(y.unique()) > 4:   # few labels: the loop is cheaper
-            return self._dcgan(z, y)
+        if isinstance(self._t[0], DCGANTemplate) and (z.is_cuda or len(y.unique()) > 4):   # CPU, few labels:
+            return self._dcgan(z, y)                                                     # the loop is cheaper
         from torch.func import functional_call
         out = None
         for k in y.unique():                                   # ponytail: one pass per label in the batch
@@ -114,8 +157,9 @@ class PerLabelGenerator(nn.Module):
         """Same function as the loop, whole batch at once: every sample's own weights (its label's row),
         grouped transposed convolutions (groups = batch), BatchNorm statistics per label group."""
         F = nn.functional
-        B, inv = len(z), y.unique(return_inverse=True)[1]
-        cnt = torch.bincount(inv).to(z.dtype)[:, None]
+        B, inv, L = len(z), y, self.emb.num_embeddings          # static shapes: CUDA-graph capturable
+        cnt = torch.zeros(L, 1, dtype=z.dtype, device=z.device).index_add_(
+            0, y, torch.ones(B, 1, dtype=z.dtype, device=z.device)).clamp_min_(1)
         parts = dict(zip([n for n, _ in self._shapes],
                          self.emb.weight[y].split([s.numel() for _, s in self._shapes], 1)))
         x, mods = z.view(B, -1, 1, 1), list(self._t[0].net)
@@ -207,12 +251,22 @@ class ClientCBNGAN:
 
     def __init__(self, generator, discriminator, config=None, device='cpu', seed=None):
         config = config or {}
+        self.config = config
         self.device, self.G, self.D = device, generator.to(device), discriminator.to(device)
         self.noise_dim = config.get('gen_noise_dim', 128)
         self.epochs = config.get('gen_local_epochs', 1)
+        cuda = str(device).startswith('cuda')
+        # CUDA speed-ups (same maths): fused Adam = one kernel per optimizer step; a CUDA graph replays a
+        # whole D+G training step with one launch instead of ~1,100 (the step was launch-bound)
+        self.graphs = cuda and config.get('cuda_graph', True)
         args = dict(lr=config.get('gen_lr', 2e-4), betas=(config.get('gan_beta1', .5), config.get('gan_beta2', .999)))
+        if cuda and config.get('fused_adam', True):
+            args.update(fused=True, capturable=self.graphs)
+        elif self.graphs:
+            args.update(capturable=True)
         self.g_opt = torch.optim.Adam(self.G.parameters(), **args)
         self.d_opt = torch.optim.Adam(self.D.parameters(), **args)
+        self._graph, self._static, self._warm = None, None, 0
         self._ref = None
         self.guide, self.guide_weight = None, 0.   # heter: frozen local classifier guiding G (set_guide)
         self._rng_device = str(device) if str(device).startswith('cuda') else 'cpu'    # keep cuda:k
@@ -236,34 +290,87 @@ class ClientCBNGAN:
 
     def train(self, loader) -> dict:
         """Returns {local label: samples seen} (first epoch)."""
-        bce, counts = nn.BCEWithLogitsLoss(), {}
+        counts = {}
         self.G.train(); self.D.train()
+        full = getattr(loader, 'batch_size', None)
         for epoch in range(self.epochs):
             for x, y in loader:
-                x, y = x.to(self.device), y.to(self.device)
                 if len(x) < 2:
                     continue
-                if epoch == 0:
-                    for a, c in zip(*np.unique(y.cpu().numpy(), return_counts=True)):
+                if epoch == 0:                                   # counted on the CPU copy: no GPU sync
+                    for a, c in zip(*np.unique((y.cpu() if y.is_cuda else y).numpy(), return_counts=True)):
                         counts[int(a)] = counts.get(int(a), 0) + int(c)
-                real, fake = torch.ones(len(x), 1, device=self.device), torch.zeros(len(x), 1, device=self.device)
-                self.d_opt.zero_grad()
-                d_loss = .5 * (bce(self.D(x, y).view(-1, 1), real)
-                               + bce(self.D(self.G(self._noise(len(x)), y).detach(), y).view(-1, 1), fake))
-                d_loss.backward(); self.d_opt.step()
-                self.g_opt.zero_grad()
-                fake_x = self.G(self._noise(len(x)), y)
-                g_loss = bce(self.D(fake_x, y).view(-1, 1), real)
-                if self.guide is not None:                # heter: the client's own classifier must
-                    out = self.guide(fake_x)              # recognise the generated class
-                    g_loss = g_loss + self.guide_weight * nn.functional.cross_entropy(
-                        out[1] if isinstance(out, tuple) else out, y)
-                g_loss.backward()
-                self.g_opt.step()
+                if self.graphs and len(x) == full:
+                    self._graph_step(x, y)
+                else:
+                    with _GPU.read() if self.graphs else nullcontext():
+                        z1, z2 = self._noise(len(x)), self._noise(len(x))   # same draws and order as before
+                        self._step(x.to(self.device), y.to(self.device), z1, z2)
         return counts
+
+    def _step(self, x, y, z1, z2):
+        """One D step then one G step (the whole update; also what a CUDA graph records)."""
+        bce = nn.functional.binary_cross_entropy_with_logits
+        real, fake = torch.ones(len(x), 1, device=x.device), torch.zeros(len(x), 1, device=x.device)
+        self.d_opt.zero_grad()
+        d_loss = .5 * (bce(self.D(x, y).view(-1, 1), real)
+                       + bce(self.D(self.G(z1, y).detach(), y).view(-1, 1), fake))
+        d_loss.backward(); self.d_opt.step()
+        self.g_opt.zero_grad()
+        fake_x = self.G(z2, y)
+        g_loss = bce(self.D(fake_x, y).view(-1, 1), real)
+        if self.guide is not None:                        # heter: the client's own classifier must
+            out = self.guide(fake_x)                      # recognise the generated class
+            g_loss = g_loss + self.guide_weight * nn.functional.cross_entropy(
+                out[1] if isinstance(out, tuple) else out, y)
+        g_loss.backward()
+        self.g_opt.step()
+
+    def _graph_step(self, x, y):
+        """Full batches: GRAPH_WARMUP ordinary steps on a side stream, then the step is captured once
+        and replayed (inputs copied into fixed buffers). Any capture failure -> ordinary steps.
+        Every GPU call sits under the lock (shared for steps, exclusive for the capture)."""
+        dev = torch.device(self.device)
+        n = len(x)
+        if self._graph is not None or self._warm < GRAPH_WARMUP:
+            with _GPU.read(), torch.cuda.device(dev):
+                z1, z2 = self._noise(n), self._noise(n)
+                if self._graph is not None:
+                    for buf, v in zip(self._static, (x, y, z1, z2)):
+                        buf.copy_(v)
+                    self._graph.replay()
+                    return
+                side = torch.cuda.Stream(dev)             # warm-up: real steps, on a side stream
+                side.wait_stream(torch.cuda.current_stream(dev))
+                with torch.cuda.stream(side):
+                    self._step(x.to(dev), y.to(dev), z1, z2)
+                torch.cuda.current_stream(dev).wait_stream(side)
+                self._warm += 1
+                return
+        with _GPU.write(), torch.cuda.device(dev):        # capture once; other clients wait
+            z1, z2 = self._noise(n), self._noise(n)
+            self._static = [v.to(dev).clone() for v in (x, y, z1, z2)]
+            self.d_opt.zero_grad(set_to_none=True); self.g_opt.zero_grad(set_to_none=True)
+            graph = torch.cuda.CUDAGraph()
+            try:
+                with torch.cuda.graph(graph, capture_error_mode='thread_local'):
+                    self._step(*self._static)
+            except Exception as e:                        # recorded, not run: weights untouched
+                print(f'[cuda graph] capture failed ({type(e).__name__}: {e}); ordinary steps from now on',
+                      flush=True)
+                self.graphs, self._static = False, None
+                self._step(x.to(dev), y.to(dev), z1, z2)
+                return
+            self._graph = graph
+            graph.replay()                                # this batch's step
+
+    def _drop_graph(self):
+        """Optimizer state or guide replaced: the recorded graph points at old tensors."""
+        self._graph, self._static, self._warm = None, None, 0
 
     def set_guide(self, classifier, weight):
         """Frozen local classifier (never uploaded): G's loss += weight * CE(classifier(G(z, y)), y)."""
+        self._drop_graph()
         classifier = classifier.to(self.device).eval()
         for p in classifier.parameters():
             p.requires_grad_(False)
@@ -282,5 +389,6 @@ class ClientCBNGAN:
     def load_state_dict(self, state: dict):
         self.G.load_state_dict(state['G']); self.D.load_state_dict(state['D'])
         self.g_opt.load_state_dict(state['g_opt']); self.d_opt.load_state_dict(state['d_opt'])
+        self._drop_graph()
         self._ref = None if state['ref'] is None else tuple(a.numpy().copy() for a in state['ref'])
         self.rng.set_state(state['rng'])

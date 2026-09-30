@@ -416,3 +416,36 @@ class CBNCompressTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ClientProcessTests(unittest.TestCase):
+    def test_worker_processes_give_the_same_run_as_threads(self):
+        from tensor_loader import TensorLoader
+
+        def run(procs, ckpt):
+            torch.manual_seed(7); np.random.seed(7)
+            clients, spaces, tests = build_synthetic(CONFIG)
+            for c in clients:                              # pre-decoded 8-bit images (what the workers need)
+                x, y = c.train_loader.dataset.tensors
+                u8 = torch.round((x.clamp(-1, 1) * .5 + .5) * 255).to(torch.uint8)
+                c.train_loader = TensorLoader.from_tensors(u8, y, 4, shuffle=True)
+            return secure_cbn.run(clients, spaces, tests, lambda k: TinyCBNGenerator(k, 4, 2), TinyLocalDiscriminator,
+                                  TinyClassifier, CONFIG, DICTIONARY, agg='secagg', rounds=3, seed=3,
+                                  domain_check=False, workers=2, client_procs=procs, checkpoint_dir=ckpt,
+                                  union_result=union)
+        global union
+        union = None
+        with tempfile.TemporaryDirectory() as d:
+            a = run(False, Path(d) / 'threads')
+            union = a['union']
+            b = run(True, Path(d) / 'procs')
+            np.testing.assert_array_equal(a['table'], b['table'])
+            np.testing.assert_array_equal(a['trunk'], b['trunk'])
+            self.assertEqual([h['accuracy'] for h in a['history']], [h['accuracy'] for h in b['history']])
+            ca = torch.load(Path(d) / 'threads' / 'clients' / 'round_0003.pt', weights_only=False)['clients']
+            cb = torch.load(Path(d) / 'procs' / 'clients' / 'round_0003.pt', weights_only=False)['clients']
+            for cid in ca:                                 # checkpointed client state and shuffle state match
+                for k in ('G', 'D'):
+                    for n in ca[cid][k]:
+                        torch.testing.assert_close(ca[cid][k][n], cb[cid][k][n], rtol=0, atol=0)
+                self.assertTrue(torch.equal(ca[cid]['shuffle'], cb[cid]['shuffle']))

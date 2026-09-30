@@ -248,6 +248,8 @@ def data_hash(loader):
     return h.hexdigest()
 
 
+SPEED_ONLY = ('cuda_graph', 'fused_adam')     # config keys that only change speed: not part of the run's
+                                              # identity (resume, generator cache keys stay valid)
 GENERATOR_CACHE_VERSION = 1          # bump when ClientCBNGAN.train changes: old cache entries stop matching
 
 
@@ -355,7 +357,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         save_every=1, keep_all=False, resume=None, seed=0, progress=False, on_resume=None, domain_check=True,
         samples_per_label=16, union_result=None, quantize=True, keep_frac=0.1, quant_scale0=0.05,
         min_holders=2, warmup_epochs=0, union='exact', keywords=None, fuzzy=None, generator_cache=None,
-        cache_every=5, guide_factory=None, guide_epochs=5, guide_weight=.5):
+        cache_every=5, guide_factory=None, guide_epochs=5, guide_weight=.5, client_procs=None):
     """gen_factory(num_rows) -> CBN generator; disc_factory(k) -> local D over k labels.
     agg: 'secagg' (the protocol) or 'plain' (Plain-GeFL, no cryptography).
     union_result: reuse a cbn_union() output (the OPRF indices are random per run).
@@ -389,7 +391,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
     say = tqdm.write if progress else (lambda *_: None)
     manifest = dict(ids=ids, names=_digest(names), data=[len(c.train_loader.dataset) for c in clients],
                     agg=agg, quantize=quant, keep_frac=keep_frac if quant else 1.0, quant_scale0=quant_scale0,
-                    min_holders=min_holders, seed=seed, config=_digest(config), domain_check=domain_check,
+                    min_holders=min_holders, seed=seed, config=_digest({k: v for k, v in config.items() if k not in SPEED_ONLY}), domain_check=domain_check,
                     warmup_epochs=warmup_epochs, clip_feedback=quant, union=union,
                     guide=dict(epochs=guide_epochs, weight=guide_weight) if guide_factory else None,
                     fuzzy=_digest([keywords, fuzzy]) if union == 'fuzzy' else None)
@@ -472,6 +474,8 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         print(f"[heter] classifiers ready: {len(guide_summary['architectures'])} architectures, mean train acc "
               f"{np.mean([a for _, a, _ in got]):.3f}, {guide_summary['from_cache']}/{n_cl} from cache", flush=True)
     shuffle_state = lambda v: getattr(getattr(v['shuffle'], 'generator', None), 'get_state', lambda: None)()
+    client_state = lambda v: (lambda st: st if 'shuffle' in st else dict(st, shuffle=shuffle_state(v)))(
+        v['gan'].state_dict())                                            # a worker proxy includes its shuffle
 
     ck = cs = ev_state = None
     if resume:
@@ -672,7 +676,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         _save(d / cfile, dict(                                            # 1. clients' private state
             format=CHECKPOINT_FORMAT + '/clients', round=done, qrng=qrng.bit_generator.state,
             union=dict(index=Un['index'], sks=Un['sks']),
-            clients={cid: dict(v['gan'].state_dict(), shuffle=shuffle_state(v)) for cid, v in local.items()}))
+            clients={cid: client_state(v) for cid, v in local.items()}))
         agg_state = dict(format=CHECKPOINT_FORMAT, round=done, manifest=manifest, clients_file=cfile,
                          trunk=trunk, table=table, sent=sent, U=U, pks=Un['pks'], union_info=Un['info'],
                          scales=(sc_t, sc_r, mult_t, mult_r), history=history, rng=_rng_state(), warmed=warmed or done > 0,
@@ -690,6 +694,29 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
     if warmed_now and checkpoint_dir:
         save_checkpoint(0, warmed=True)                                   # a crash in round 1 keeps it
         write_json(Path(checkpoint_dir) / 'setup.json', setup)
+
+    # clients in worker processes (no GIL; each client's step is launch-bound on one CPU core); same
+    # numbers: the pre-decoded images, noise generators and shuffles move with the client
+    if client_procs is None:
+        client_procs = workers > 1 and n_cl > 1 and all(str(d).startswith('cuda') for d in devices)
+    procs = None
+    if client_procs and all(hasattr(getattr(v['loader'], 'dataset', None), 'x') for v in local.values()):
+        import tempfile
+        from secfl.client_procs import ClientPool
+        print(f'[clients] {min(workers, n_cl)} worker processes for {n_cl} clients', flush=True)
+        try:
+            procs = ClientPool(local, clients, min(workers, n_cl),
+                               tempfile.mkdtemp(prefix='clients_', dir=checkpoint_dir or None))
+        except Exception as e:                                            # clients still here: threads
+            print(f'[clients] worker processes failed to start ({e}); using threads', flush=True)
+        else:
+            for c in clients:
+                local[c.id]['gan'] = procs.proxy(c.id, local[c.id]['gan'])
+            torch.set_num_threads(max(1, os.cpu_count() or 1))           # clients no longer share this process
+        if any(str(d).startswith('cuda') for d in devices):
+            torch.cuda.empty_cache()
+    elif client_procs:
+        print('[clients] worker processes need pre-decoded images (tensor loader); using threads', flush=True)
 
     bb = BulletinBoard()
     model = trainer.model
@@ -747,6 +774,11 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                 results.append(train_client(c))
                 inner.update()
         inner.close()
+        if procs is not None:                          # the workers' loaders drew their per-epoch seeds from
+            from tensor_loader import _base_seed       # their own global RNG; draw as many here, so the
+            for c in clients:                          # Aggregator's later random numbers stay the same
+                for _ in range(local[c.id]['gan'].epochs):
+                    _base_seed(None)
         row['seconds']['local_training'] = time.perf_counter() - t
 
         t = time.perf_counter()                                           # 5. aggregation
@@ -822,4 +854,6 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
             row['seconds']['checkpoint'] = time.perf_counter() - t
     bar.close()
     setup.update(trunk_params=int(trunk.size), row_params=int(P), resumed_from=start)
+    if procs is not None:
+        procs.close()
     return dict(history=history, setup=setup, evaluator=evaluator, model=model, trunk=trunk, table=table, sent=sent, union=Un)

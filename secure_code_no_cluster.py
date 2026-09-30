@@ -432,6 +432,11 @@ def main():
     p.add_argument('--guide-epochs', type=int, default=5, help='--heter: classifier training epochs (cached)')
     p.add_argument('--guide-weight', type=float, default=.5,
                    help='--heter: generator loss = GAN loss + weight x CE(classifier(G(z, y)), y)')
+    p.add_argument('--client-procs', choices=('auto', 'on', 'off'), default='auto',
+                   help='train clients in worker processes (auto: on with CUDA and --workers > 1); same results')
+    p.add_argument('--no-cuda-graph', action='store_true',
+                   help='CUDA: run every GAN step op by op instead of replaying a captured graph (slower)')
+    p.add_argument('--no-fused-adam', action='store_true', help='CUDA: the default (unfused) Adam')
     p.add_argument('--no-tensor-loader', action='store_true',
                    help='decode images with the torchvision DataLoader every epoch (slow; same numbers)')
     p.add_argument('--per-label-gen', action='store_true',
@@ -447,6 +452,7 @@ def main():
     args.device = resolve_device(args.device)
     seed_all(args.seed)
     config = OmegaConf.to_container(OmegaConf.load(args.exp_conf), resolve=True)
+    config.update(cuda_graph=not args.no_cuda_graph, fused_adam=not args.no_fused_adam)
     if args.fast:
         config.update(gen_local_epochs=1, global_model_epochs=1, global_samples_per_class=32)
         args.rounds = args.rounds or 3
@@ -546,7 +552,8 @@ def main():
                                 warmup_epochs=args.warmup_epochs, generator_cache=args.generator_cache,
                                 union='fuzzy' if args.union == 'fuzzy' else 'exact', keywords=keywords, fuzzy=fuzzy,
                                 guide_factory=guide_f if args.heter else None, guide_epochs=args.guide_epochs,
-                                guide_weight=args.guide_weight, **common)
+                                guide_weight=args.guide_weight,
+                                client_procs={'auto': None, 'on': True, 'off': False}[args.client_procs], **common)
     else:
         result = run(clients, spaces, tests, gen_f, disc_f, cls_f, config, dictionary, code_dim=code_dim,
                      union=args.union, **common)

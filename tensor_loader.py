@@ -53,6 +53,14 @@ class TensorLoader:
         self.batch_size = loader.batch_size or 64
         self.sampler = SimpleNamespace(generator=torch.Generator()) if shuffle else None
 
+    @classmethod
+    def from_tensors(cls, x, y, batch_size, shuffle):
+        """Rebuild from the stored uint8 images and labels (client worker processes)."""
+        self = cls.__new__(cls)
+        self.dataset, self.batch_size = TensorData(x, y), batch_size
+        self.sampler = SimpleNamespace(generator=torch.Generator()) if shuffle else None
+        return self
+
     @staticmethod
     def _read(dataset, workers):
         xs, ys = [], []

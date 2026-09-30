@@ -1,6 +1,6 @@
 % ---------------------------------------------------------------------------------------------
 %  Setup phase: label union + per-index KEM keys (label_union/oprf_union.py, fuzzy_union.py)
-%  Needs: \usepackage{amsmath,amssymb,algorithm,algpseudocode}
+%  Needs: \usepackage{amsmath,amssymb,amsthm,algorithm,algpseudocode}; \theoremstyle{remark}\newtheorem{remark}{Remark}
 %         \newcommand{\Agg}{\mathsf{AGG}}
 %  Algorithms 1-5 are the components; Algorithm 6 fixes the shared variables and calls them.
 % ---------------------------------------------------------------------------------------------
@@ -47,7 +47,7 @@ SHA-256 based and salted with a public counter $s$. $\SecAgg_{b}(\{v_i\})$ retur
 \begin{algorithmic}[1]
 \Require key lists $K_1,\dots,K_n$ ($K_i$ = distinct values of $\kappa_i$); key shares
   $k_1,\dots,k_n\in\mathbb{Z}_L^*$ ($k_i$ known to $c_i$ only); list length $m_{\max}\ge\max_i|K_i|$
-\Ensure tag maps $T_i:K_i\to\mathbb{G}$ with $T_i(y)=\mathsf{K}\cdot H(y)$, $\mathsf{K}=\prod_j k_j$ (held by nobody)
+\Ensure tag maps $T_i:K_i\to\mathbb{G}$ with $T_i(y)=\mathsf{K}\cdot H(y)$, $\mathsf{K}=\prod_j k_j \bmod L$ (never assembled, see Remark~\ref{rem:jointkey})
 \For{each client $c_i$ \textbf{in parallel}}
   \For{$a=1,\dots,m_{\max}$}
     \State $\rho_a\sample\mathbb{Z}_L^*$
@@ -61,6 +61,28 @@ SHA-256 based and salted with a public counter $s$. $\SecAgg_{b}(\{v_i\})$ retur
 \State \Return $T_1,\dots,T_n$
 \end{algorithmic}
 \end{algorithm}
+
+\begin{remark}[The joint key $\mathsf{K}$ is held by nobody]\label{rem:jointkey}
+$\mathsf{K}=\prod_{j=1}^n k_j$ is a product of the $n$ key shares, and it is never computed: each
+$c_j$ keeps $k_j$ private and only ever applies it to a point that passes by (line~7, and line~9 for the
+owner). Correctness follows because scalar multiplication commutes: the owner gets its list back as
+$\bigl(\prod_{j\neq i}k_j\bigr)\rho_a H(y_a)$ and multiplies by $k_i\rho_a^{-1}$, so
+$T_i(y_a)=\bigl(\prod_j k_j\bigr)H(y_a)=\mathsf{K}\cdot H(y_a)$ whichever client started. Hence
+\begin{itemize}
+  \item a tag exists only if \emph{every} client took part in computing it: no single client, no
+        coalition missing one client, and not $\Agg$ (which holds no share) can evaluate
+        $y\mapsto\mathsf{K}\cdot H(y)$ offline. In particular $\Agg$ cannot hash candidate names
+        (``cat'', ``dog'', \dots) to test them against the occupied buckets (Alg.~\ref{alg:bucket}) or
+        the posted public keys (Alg.~\ref{alg:pkagg}), because $sk=H_{\mathrm{sk}}(T)$ is derived from
+        the tag, not from the name;
+  \item a relaying client sees only $\rho_a\cdot(\text{partial product})\cdot H(y_a)$ with a fresh
+        uniform $\rho_a\in\mathbb{Z}_L^*$: in a prime-order group this is a uniformly random point,
+        independent of $y_a$, and padding points look the same, so relays learn neither the
+        labels nor how many there are.
+\end{itemize}
+The shares are used in setup only and discarded afterwards, so no tag can be computed after
+setup either.
+\end{remark}
 
 % ------------------------------------------------------------------ 3. bucket union
 \begin{algorithm}[t]
