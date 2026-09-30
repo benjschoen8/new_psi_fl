@@ -1,0 +1,162 @@
+% ---------------------------------------------------------------------------------------------
+%  Setup phase: label union + per-index KEM keys (label_union/oprf_union.py, fuzzy_union.py)
+%  Needs: \usepackage{amsmath,amssymb,algorithm,algpseudocode}
+%         \newcommand{\Agg}{\mathsf{AGG}}
+%  Algorithms 1-5 are the components; Algorithm 6 fixes the shared variables and calls them.
+% ---------------------------------------------------------------------------------------------
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Output:}}
+\providecommand{\Agg}{\mathsf{AGG}}
+\newcommand{\SecAgg}{\mathsf{SecAgg}}
+\newcommand{\sample}{\xleftarrow{\$}}
+
+\paragraph*{Notation} $\mathbb{G}$: the ristretto255 group of prime order $L$ with generator $B$;
+$H:\{0,1\}^*\to\mathbb{G}$ hash-to-group; $H_{\mathrm{sk}}:\mathbb{G}\to\mathbb{Z}_L$ hash-to-scalar;
+$h_s:\mathbb{G}\to[0,2^\beta)$ and $\mathrm{chk}_s:\mathbb{G}\to\mathbb{Z}_{2^{64}}$ (odd) are
+SHA-256 based and salted with a public counter $s$. $\SecAgg_{b}(\{v_i\})$ returns $\sum_i v_i
+\bmod 2^b$ to $\Agg$ only~\cite{bonawitz2017practical}.
+
+% ------------------------------------------------------------------ 1. fuzzy local mapping
+\begin{algorithm}[t]
+\caption{$\mathsf{AnchorKey}$: local label key (fuzzy union), run by client $c_i$}
+\label{alg:anchor}
+\begin{algorithmic}[1]
+\Require own labels $X_i$; keyword $w(x)$ and domain code $d(x)$ for $x\in X_i$; own language
+  $\ell_i$; public encoder $E$; public anchors $\mathcal{A}$: embeddings $a_1,\dots,a_N$, synonym
+  class $\mathrm{cls}(\cdot)$, hub penalty $\pi_1,\dots,\pi_N$, false friends $F_{\ell}$; floor $\tau$
+\Ensure key map $\kappa_i: X_i\to\{0,1\}^*$
+\For{$x\in X_i$}
+  \State $t\gets\mathrm{Norm}(w(x))$ \Comment{NFKC, digits spelled out, lower-case words}
+  \If{$t$ is a single Latin letter}
+    \State $\kappa_i(x)\gets \texttt{text:}\,t$ \Comment{case kept: `A' $\neq$ `a'}
+  \Else
+    \State $e\gets E(t)$
+    \State $j^\star\gets\arg\max_{j\notin F_{\ell_i}}\; 2\langle e,a_j\rangle-\pi_j$ \Comment{CSLS snap}
+    \State $\kappa_i(x)\gets \texttt{anchor:}\,\mathrm{cls}(j^\star)$ \textbf{if} $\langle e,a_{j^\star}\rangle\ge\tau$ \textbf{else} $\texttt{text:}\,t$
+  \EndIf
+  \State $\kappa_i(x)\gets\kappa_i(x)\,\|\,d(x)$
+\EndFor
+\State \Return $\kappa_i$ \Comment{local only; nothing is sent}
+\end{algorithmic}
+\end{algorithm}
+
+% ------------------------------------------------------------------ 2. ring OPRF
+\begin{algorithm}[t]
+\caption{$\mathsf{RingOPRF}$: tags under a joint key nobody holds}
+\label{alg:oprf}
+\begin{algorithmic}[1]
+\Require key lists $K_1,\dots,K_n$ ($K_i$ = distinct values of $\kappa_i$); key shares
+  $k_1,\dots,k_n\in\mathbb{Z}_L^*$ ($k_i$ known to $c_i$ only); list length $m_{\max}\ge\max_i|K_i|$
+\Ensure tag maps $T_i:K_i\to\mathbb{G}$ with $T_i(y)=\mathsf{K}\cdot H(y)$, $\mathsf{K}=\prod_j k_j$ (held by nobody)
+\For{each client $c_i$ \textbf{in parallel}}
+  \For{$a=1,\dots,m_{\max}$}
+    \State $\rho_a\sample\mathbb{Z}_L^*$
+    \State $P_a\gets \rho_a\cdot H(y_a)$ \textbf{if} $a\le|K_i|$ \textbf{else} $\rho_a\cdot(\sigma_a B)$, $\sigma_a\sample\mathbb{Z}_L$ \Comment{blind, pad}
+  \EndFor
+  \For{$\mathit{step}=1,\dots,n-1$} \Comment{around the ring}
+    \State $j\gets(i+\mathit{step})\bmod n$;\quad $c_j$: $P_a\gets k_j\cdot P_a$ for all $a$
+  \EndFor
+  \State $c_i$: $T_i(y_a)\gets (k_i\rho_a^{-1})\cdot P_a$ for $a\le|K_i|$ \Comment{own share, unblind}
+\EndFor
+\State \Return $T_1,\dots,T_n$
+\end{algorithmic}
+\end{algorithm}
+
+% ------------------------------------------------------------------ 3. bucket union
+\begin{algorithm}[t]
+\caption{$\mathsf{BucketUnion}$: occupied buckets by one SecAgg}
+\label{alg:bucket}
+\begin{algorithmic}[1]
+\Require tag maps $T_1,\dots,T_n$; bucket bits $\beta$
+\Ensure $\Agg$: $U$ and sorted bucket list $O$ (public); $c_i$: index map $\iota_i:K_i\to[0,U)$
+\For{$s=0,1,2,\dots$} \Comment{public salt; a new $s$ only after a collision}
+  \For{each client $c_i$}
+    \State $v_i\gets 0\in\mathbb{Z}_{2^{64}}^{2\cdot 2^\beta}$
+    \For{$y\in K_i$}
+      \State $b\gets h_s(T_i(y))$;\quad $r\sample\mathbb{Z}_{2^{64}}$
+      \State $v_i[b]\gets r$;\quad $v_i[2^\beta+b]\gets r\cdot\mathrm{chk}_s(T_i(y))$
+    \EndFor
+  \EndFor
+  \State $(A\,\|\,C)\gets\SecAgg_{64}(\{v_i\})$ \Comment{$\Agg$ sees only the sum}
+  \State $\Agg$: $O\gets\mathrm{sort}\{b: A_b\neq 0\lor C_b\neq 0\}$;\ publish $O$;\ $U\gets|O|$
+  \State each $c_i$: $\mathit{ok}_i\gets\bigwedge_{y\in K_i} \bigl[A_b\ne 0\ \land\ C_b=\mathrm{chk}_s(T_i(y))\cdot A_b\bigr]$, $b=h_s(T_i(y))$
+  \If{all $\mathit{ok}_i$} \textbf{break} \Comment{else two labels share a bucket: next $s$}
+  \EndIf
+\EndFor
+\State $c_i$: $\iota_i(y)\gets$ position of $h_s(T_i(y))$ in $O$
+\State \Return $(U,O)$ to $\Agg$; $\iota_i$ to $c_i$
+\end{algorithmic}
+\end{algorithm}
+
+% ------------------------------------------------------------------ 4. slot keys
+\begin{algorithm}[t]
+\caption{$\mathsf{SlotKey}$: KEM key pair of an index, run by each holder}
+\label{alg:slotkey}
+\begin{algorithmic}[1]
+\Require tag $T\in\mathbb{G}$ of an own key
+\Ensure $sk\in\mathbb{Z}_L$, $pk\in\mathbb{G}$ (same for every holder of the label)
+\State $sk\gets H_{\mathrm{sk}}(T)$;\quad $pk\gets sk\cdot B$
+\State \Return $(sk,pk)$
+\end{algorithmic}
+\end{algorithm}
+
+% ------------------------------------------------------------------ 5. pk aggregation
+\begin{algorithm}[t]
+\caption{$\mathsf{PkAgg}$: $\Agg$ learns every $pk$ but not its holders}
+\label{alg:pkagg}
+\begin{algorithmic}[1]
+\Require index maps $\iota_i$; public keys $pk_i(y)$ of own keys $y\in K_i$; $U$
+\Ensure $pk_0,\dots,pk_{U-1}$ at $\Agg$ (posted on the bulletin board)
+\Repeat
+  \For{each client $c_i$}
+    \State $v_i\gets 0\in\mathbb{Z}_{2^{64}}^{U\times 17}$
+    \For{$y\in K_i$}
+      \State $(\gamma_1,\dots,\gamma_{16})\gets$ 16-bit chunks of $pk_i(y)$;\quad $r\sample\mathbb{Z}_{2^{64}}$
+      \State $v_i[\iota_i(y)]\gets(r,\ r\gamma_1,\dots,r\gamma_{16})$ \Comment{non-holders: zeros}
+    \EndFor
+  \EndFor
+  \State $W\gets\SecAgg_{64}(\{v_i\})$
+  \For{$k=0,\dots,U-1$} \Comment{$\Agg$}
+    \State $(A,C_1,\dots,C_{16})\gets W[k]$;\quad write $A=2^{e}a'$, $a'$ odd
+    \State $\gamma_j\gets (C_j/2^{e})\cdot a'^{-1}\bmod 2^{64-e}$;\quad $pk_k\gets\gamma_1\|\cdots\|\gamma_{16}$
+  \EndFor
+\Until{every row has $A\neq0$, $e\le 48$ and $\gamma_j<2^{16}$} \Comment{fails w.p.\ $\le 2^{-48}$}
+\State \Return $pk_0,\dots,pk_{U-1}$
+\end{algorithmic}
+\end{algorithm}
+
+% ------------------------------------------------------------------ 6. combined setup
+\begin{algorithm}[t]
+\caption{$\mathsf{Setup}$: label union and KEM keys}
+\label{alg:setup}
+\begin{algorithmic}[1]
+\Require clients $c_1,\dots,c_n$ with label sets $X_i$ (fuzzy: keywords $w$, language $\ell_i$);
+  mode $\in\{\text{exact},\text{fuzzy}\}$
+\Ensure $\Agg$: $U$, $pk_0,\dots,pk_{U-1}$; $c_i$: $\mathrm{idx}_i:X_i\to[0,U)$ and $sk_i:X_i\to\mathbb{Z}_L$
+\Statex \textit{Public parameters}
+\State $(\mathbb{G},B,L,H,H_{\mathrm{sk}},h_s,\mathrm{chk}_s)$;\ $\beta\gets 20$;\ $m_{\max}$ (public bound on labels per client)
+\State fuzzy: $E$, anchors $\mathcal{A}=\bigl((a_j,\pi_j)_{j\le N},\mathrm{cls},(F_\ell)_\ell\bigr)$, $\tau$ \Comment{$N{=}2000$, hub $5$, $\tau{=}0$}
+\Statex \textit{Local (no communication)}
+\For{each client $c_i$}
+  \State $k_i\sample\mathbb{Z}_L^*$ \Comment{OPRF key share}
+  \If{fuzzy}
+    \State $\kappa_i\gets\mathsf{AnchorKey}(X_i,w,d,\ell_i,E,\mathcal{A},\tau)$
+  \Else
+    \State $\kappa_i(x)\gets x\,\|\,d(x)$ for all $x\in X_i$ \Comment{exact}
+  \EndIf
+  \State $K_i\gets\{\kappa_i(x):x\in X_i\}$
+\EndFor
+\Statex \textit{Interactive}
+\State $(T_i)_{i\le n}\gets\mathsf{RingOPRF}\bigl((K_i)_{i\le n};\ (k_i)_{i\le n};\ m_{\max}\bigr)$
+\State $(U,O),(\iota_i)_{i\le n}\gets\mathsf{BucketUnion}\bigl((T_i)_{i\le n};\ \beta\bigr)$
+\For{each client $c_i$ and $y\in K_i$}
+  \State $(\hat{sk}_i(y),\hat{pk}_i(y))\gets\mathsf{SlotKey}(T_i(y))$
+\EndFor
+\State $(pk_k)_{k<U}\gets\mathsf{PkAgg}\bigl((\iota_i)_{i\le n};\ (\hat{pk}_i)_{i\le n};\ U\bigr)$
+\Statex \textit{Result}
+\For{each client $c_i$ and $x\in X_i$} \Comment{labels with one key share a row}
+  \State $\mathrm{idx}_i(x)\gets\iota_i(\kappa_i(x))$;\quad $sk_i(x)\gets\hat{sk}_i(\kappa_i(x))$
+\EndFor
+\State \Return $U,(pk_k)_k$ to $\Agg$;\ $(\mathrm{idx}_i,sk_i)$ to $c_i$
+\end{algorithmic}
+\end{algorithm}

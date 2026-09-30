@@ -432,6 +432,8 @@ def main():
     p.add_argument('--guide-epochs', type=int, default=5, help='--heter: classifier training epochs (cached)')
     p.add_argument('--guide-weight', type=float, default=.5,
                    help='--heter: generator loss = GAN loss + weight x CE(classifier(G(z, y)), y)')
+    p.add_argument('--no-tensor-loader', action='store_true',
+                   help='decode images with the torchvision DataLoader every epoch (slow; same numbers)')
     p.add_argument('--per-label-gen', action='store_true',
                    help='cbn: one whole generator per label (no shared trunk) instead of trunk + CBN rows')
     p.add_argument('--gen-widths', default='64,32,16', help='--per-label-gen: DCGAN widths of each label generator')
@@ -472,6 +474,14 @@ def main():
             for c in clients:
                 c.train_loader = subsample(c.train_loader, args.fast_samples, args.seed + c.id, shuffle=True)
             tests = [(name, cid, subsample(l, args.fast_samples, args.seed + cid)) for name, cid, l in tests]
+        if not args.no_tensor_loader:                                  # decode every image once, not per epoch
+            from tensor_loader import TensorLoader
+            try:
+                for c in clients:
+                    c.train_loader = TensorLoader(c.train_loader, shuffle=True)
+                tests = [(name, cid, TensorLoader(l, shuffle=False)) for name, cid, l in tests]
+            except ValueError as e:                                    # non-8-bit transforms: keep DataLoaders
+                print(f'[data] {e}')
         # ponytail: default dictionary = the public class lists of the loaded datasets
         dictionary = (args.dictionary.read_text().split('\n') if args.dictionary
                       else sorted({x for names in spaces.values() for x in names}))

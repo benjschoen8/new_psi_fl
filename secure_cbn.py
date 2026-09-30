@@ -240,7 +240,9 @@ def data_hash(loader):
     """sha256 of every (image, label) the client trains on, in dataset order, as the model sees them."""
     from torch.utils.data import DataLoader
     h = hashlib.sha256()
-    for x, y in DataLoader(loader.dataset, batch_size=1024, shuffle=False, num_workers=0):
+    batches = loader.ordered(1024) if hasattr(loader, 'ordered') else \
+        DataLoader(loader.dataset, batch_size=1024, shuffle=False, num_workers=0)   # same bytes either way
+    for x, y in batches:
         h.update(np.ascontiguousarray(x.numpy(), np.float32).tobytes())
         h.update(np.ascontiguousarray(y.numpy(), np.int64).tobytes())
     return h.hexdigest()
@@ -264,13 +266,18 @@ def train_guide(model, loader, epochs, lr, device, seed):
     """heter: train a client's own classifier on its real local data (own shuffling, so the GAN's data
     order is untouched); returns its training accuracy in the last epoch."""
     from torch.utils.data import DataLoader
-    dl = DataLoader(loader.dataset, batch_size=getattr(loader, 'batch_size', None) or 64, shuffle=True,
-                    generator=torch.Generator().manual_seed(seed), num_workers=0)
+    bs = getattr(loader, 'batch_size', None) or 64
+    gen = torch.Generator().manual_seed(seed)                            # one stream over all epochs
+    if hasattr(loader, 'shuffled'):
+        epoch = lambda: loader.shuffled(gen, bs)
+    else:
+        dl = DataLoader(loader.dataset, batch_size=bs, shuffle=True, generator=gen, num_workers=0)
+        epoch = lambda: dl
     model.to(device).train()
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     hit = n = 0
     for e in range(epochs):
-        for x, y in dl:
+        for x, y in epoch():
             if len(x) < 2:
                 continue
             x, y = x.to(device), y.to(device)
