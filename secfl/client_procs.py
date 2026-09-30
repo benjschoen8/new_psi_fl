@@ -86,7 +86,7 @@ class ClientPool:
         """local: secure_cbn's {cid: dict(gan=ClientCBNGAN, loader=TensorLoader, shuffle=...)}."""
         ctx = mp.get_context('spawn')
         devices = sorted({str(local[c.id]['gan'].device) for c in clients})
-        per_dev = max(1, procs // len(devices))
+        per_dev = max(1, -(-procs // len(devices)))                  # ceil: 3 clients on 2 GPUs -> 2+1, not 1+1
         threads = max(1, (os.cpu_count() or 1) // max(procs, 1))
         flags = (torch.backends.cudnn.deterministic, torch.backends.cudnn.benchmark)
         self.workers, self.where, seen = {}, {}, {}

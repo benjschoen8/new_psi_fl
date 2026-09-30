@@ -10,6 +10,7 @@ venv/
 # Datasets & cache
 data/raw/
 data/cache/
+data/generator_cache/
 *.zip
 *.tar
 *.tar.gz
@@ -33,3 +34,21 @@ saved_models/
 .DS_Store
 Thumbs.db
 legacy/
+
+# Experiment outputs (run_experiments.sh, tests/plot_paper.py)
+figs/
+*.log
+*.tmp
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+graphify-out/
+
+# Editors
+.vscode/
+.idea/
+
+graphify-out/

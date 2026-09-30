@@ -73,9 +73,41 @@ def partition_class_subsets(train_labels, test_labels, n_clients, lo, hi, seed, 
             own.append(mine)
         if cover.min() >= min(min_holders, ks.sum() // C):
             break
-    tr, te = {i: [] for i in range(n_clients)}, {i: [] for i in range(n_clients)}
+    return _split_among_holders(own, train_labels, test_labels, C, rng)
+
+
+def partition_even(train_labels, test_labels, n_clients, seed, holders=2):
+    """Classes and images spread evenly: every class goes to exactly `holders` clients, every client
+    gets the same number of classes (+-1) and about the same number of images (classes, largest first,
+    go to the least-loaded clients with a free class slot: LPT scheduling). A class's samples are split
+    evenly among its holders. Same return values as partition_class_subsets."""
+    train_labels, test_labels = np.asarray(train_labels), np.asarray(test_labels)
+    C, rng = int(max(train_labels.max(), test_labels.max())) + 1, np.random.default_rng(seed)
+    if not 1 <= holders <= n_clients:
+        raise ValueError(f'holders must be in 1..{n_clients}')
+    share = np.bincount(train_labels, minlength=C) / holders           # images per holder of a class
+    slots = np.full(n_clients, C * holders // n_clients)
+    slots[rng.permutation(n_clients)[:C * holders % n_clients]] += 1
+    load, own = np.zeros(n_clients), [[] for _ in range(n_clients)]
+    for left, c in zip(range(C, 0, -1), np.lexsort((rng.random(C), -share))):   # largest first
+        free = np.flatnonzero(slots)
+        must = slots[free] == left              # a slot for every class left: must take this one too
+        pick = free[np.lexsort((rng.random(len(free)), load[free], ~must))[:holders]]
+        slots[pick] -= 1
+        load[pick] += share[c]
+        for h in pick:
+            own[h].append(c)
+    return _split_among_holders([np.sort(m) for m in own], train_labels, test_labels, C, rng)
+
+
+def _split_among_holders(own, train_labels, test_labels, C, rng):
+    """A class's train / test samples split evenly at random among the clients holding it."""
+    n = len(own)
+    tr, te = {i: [] for i in range(n)}, {i: [] for i in range(n)}
     for c in range(C):
-        holders = [i for i in range(n_clients) if c in own[i]]
+        holders = [i for i in range(n) if c in own[i]]
+        if not holders:
+            raise ValueError(f'class {c} has no client: too few classes per client to cover all {C}')
         for labels, out in ((train_labels, tr), (test_labels, te)):
             idx = rng.permutation(np.flatnonzero(labels == c))
             for h, part in zip(holders, np.array_split(idx, len(holders))):
@@ -285,10 +317,13 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
         )
 
         subsets = getattr(args, 'class_subsets', None)
-        if subsets:                                                    # own classes per client (no cache:
-            lo, hi = map(int, subsets.split(','))                      # deterministic from the seed)
+        if subsets == 'even':                                          # own classes per client (no cache:
+            own, train_idcs, test_idcs = partition_even(train_labels, test_labels, n_clients, args.seed)
+        elif subsets:                                                  # deterministic from the seed)
+            lo, hi = map(int, subsets.split(','))
             own, train_idcs, test_idcs = partition_class_subsets(train_labels, test_labels, n_clients, lo, hi,
                                                                  args.seed)
+        if subsets:
             names = list(train_dataset.classes)
             client_loaders = []
             for i in range(n_clients):

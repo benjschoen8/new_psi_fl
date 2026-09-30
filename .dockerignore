@@ -1,0 +1,3 @@
+# build context = repo root; the image needs nothing from it (code is mounted at run time)
+*
+!docker/
