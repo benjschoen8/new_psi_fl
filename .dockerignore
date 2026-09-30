@@ -1,3 +1,20 @@
-# build context = repo root; the image needs nothing from it (code is mounted at run time)
-*
-!docker/
+# The image gets the code; datasets, results, git history and local files stay out
+# (docker/run.sh mounts ./data and ./runs from the machine at run time).
+.git
+.agents
+.vscode
+.idea
+**/.DS_Store
+.env*
+.venv
+venv/
+**/__pycache__
+**/*.pyc
+data/
+runs/
+paper/
+graphify-out/
+legacy/label_mapping/
+legacy/plot/
+legacy/offline_missing_link_results/
+legacy/graphify-out/
