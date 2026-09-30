@@ -26,6 +26,11 @@ from tensor_loader import TensorLoader
 def run(G, D, mode, x, y, steps, device):
     config = dict(gen_noise_dim=128, gen_local_epochs=1, cuda_graph=mode == 'graph', fused_adam=mode != 'old')
     gan = ClientCBNGAN(copy.deepcopy(G), copy.deepcopy(D), config, device, seed=1)
+    # as in a real run: the state arrives from a cache entry / checkpoint / worker hand-over written
+    # with plain Adam settings (a restore must not switch the graph-ready optimizer off)
+    gan.load_state_dict(ClientCBNGAN(copy.deepcopy(G), copy.deepcopy(D), dict(config, cuda_graph=False,
+                                                                              fused_adam=False),
+                                     device, seed=1).state_dict())
     loader = TensorLoader.from_tensors(x, y, 64, shuffle=True)
     loader.sampler.generator.manual_seed(2)
     per_epoch = len(y) // 64

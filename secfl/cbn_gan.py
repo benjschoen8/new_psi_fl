@@ -260,10 +260,12 @@ class ClientCBNGAN:
         # whole D+G training step with one launch instead of ~1,100 (the step was launch-bound)
         self.graphs = cuda and config.get('cuda_graph', True)
         args = dict(lr=config.get('gen_lr', 2e-4), betas=(config.get('gan_beta1', .5), config.get('gan_beta2', .999)))
+        self._opt_flags = {}
         if cuda and config.get('fused_adam', True):
-            args.update(fused=True, capturable=self.graphs)
+            self._opt_flags = dict(fused=True, capturable=self.graphs)
         elif self.graphs:
-            args.update(capturable=True)
+            self._opt_flags = dict(capturable=True)
+        args.update(self._opt_flags)
         self.g_opt = torch.optim.Adam(self.G.parameters(), **args)
         self.d_opt = torch.optim.Adam(self.D.parameters(), **args)
         self._graph, self._static, self._warm = None, None, 0
@@ -364,6 +366,18 @@ class ClientCBNGAN:
             self._graph = graph
             graph.replay()                                # this batch's step
 
+    def _own_optimizer_settings(self):
+        """Optimizer.load_state_dict also restores the saved param_group settings (a cache entry or
+        checkpoint written without fused/capturable Adam): put this run's back, with the step counters
+        where fused / capturable Adam keeps them (float32 on the GPU)."""
+        for opt in (self.g_opt, self.d_opt):
+            for group in opt.param_groups:
+                group.update(self._opt_flags)
+            if self._opt_flags:
+                for st in opt.state.values():
+                    if torch.is_tensor(st.get('step')):
+                        st['step'] = st['step'].to(device=self.device, dtype=torch.float32)
+
     def _drop_graph(self):
         """Optimizer state or guide replaced: the recorded graph points at old tensors."""
         self._graph, self._static, self._warm = None, None, 0
@@ -389,6 +403,7 @@ class ClientCBNGAN:
     def load_state_dict(self, state: dict):
         self.G.load_state_dict(state['G']); self.D.load_state_dict(state['D'])
         self.g_opt.load_state_dict(state['g_opt']); self.d_opt.load_state_dict(state['d_opt'])
+        self._own_optimizer_settings()
         self._drop_graph()
         self._ref = None if state['ref'] is None else tuple(a.numpy().copy() for a in state['ref'])
         self.rng.set_state(state['rng'])

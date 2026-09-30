@@ -113,6 +113,19 @@ class PerLabelGeneratorTests(unittest.TestCase):
         self.assertTrue(res['evaluator']['union_metrics']['exact'])
 
 
+class OptimizerSettingsTests(unittest.TestCase):
+    def test_restoring_a_plain_adam_state_keeps_this_runs_settings(self):
+        plain = ClientCBNGAN(TinyCBNGenerator(3), TinyLocalDiscriminator(3), dict(gen_noise_dim=4), 'cpu', seed=0)
+        plain.g_opt.zero_grad(); sum(p.sum() for p in plain.G.parameters()).backward(); plain.g_opt.step()
+        state = plain.state_dict()
+        self.assertFalse(state['g_opt']['param_groups'][0]['capturable'])
+        gan = ClientCBNGAN(TinyCBNGenerator(3), TinyLocalDiscriminator(3), dict(gen_noise_dim=4), 'cpu', seed=0)
+        gan._opt_flags = dict(capturable=True)                              # what a CUDA-graph client uses
+        gan.load_state_dict(state)
+        self.assertTrue(all(g['capturable'] for o in (gan.g_opt, gan.d_opt) for g in o.param_groups))
+        self.assertTrue(all(st['step'].dtype == torch.float32 for st in gan.g_opt.state.values()))
+
+
 class CBNPipelineTests(unittest.TestCase):
     def test_clients_hold_only_their_rows_and_kem_blocks_others(self):
         from secfl import kem
