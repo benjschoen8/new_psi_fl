@@ -157,11 +157,13 @@ class PerLabelGenerator(nn.Module):
         """Same function as the loop, whole batch at once: every sample's own weights (its label's row),
         grouped transposed convolutions (groups = batch), BatchNorm statistics per label group."""
         F = nn.functional
-        B, inv, L = len(z), y, self.emb.num_embeddings          # static shapes: CUDA-graph capturable
-        cnt = torch.zeros(L, 1, dtype=z.dtype, device=z.device).index_add_(
-            0, y, torch.ones(B, 1, dtype=z.dtype, device=z.device)).clamp_min_(1)
+        # static shapes (CUDA-graph capturable) and a fixed summation order (reproducible on the GPU:
+        # no index_add_ / gather-backward atomics): per-label sums as a one-hot matmul, lookups as embedding
+        B, L = len(z), self.emb.num_embeddings
+        oh = torch.zeros(L, B, dtype=z.dtype, device=z.device).scatter_(0, y[None], 1.)
+        cnt = oh.sum(1, keepdim=True).clamp_min_(1)
         parts = dict(zip([n for n, _ in self._shapes],
-                         self.emb.weight[y].split([s.numel() for _, s in self._shapes], 1)))
+                         F.embedding(y, self.emb.weight).split([s.numel() for _, s in self._shapes], 1)))
         x, mods = z.view(B, -1, 1, 1), list(self._t[0].net)
         for i, m in enumerate(mods):
             if isinstance(m, nn.ConvTranspose2d):
@@ -171,10 +173,8 @@ class PerLabelGenerator(nn.Module):
                                        padding=m.padding, groups=B)
                 x = x.view(B, cout, *x.shape[2:])
             elif isinstance(m, nn.BatchNorm2d):                   # batch stats over each label's samples
-                s1 = torch.zeros(len(cnt), x.size(1), dtype=x.dtype, device=x.device).index_add_(0, inv, x.mean((2, 3)))
-                s2 = torch.zeros_like(s1).index_add_(0, inv, (x * x).mean((2, 3)))
-                mean = (s1 / cnt)[inv]
-                var = ((s2 / cnt)[inv] - mean * mean).clamp_min(0)
+                mean = F.embedding(y, oh @ x.mean((2, 3)) / cnt)
+                var = (F.embedding(y, oh @ (x * x).mean((2, 3)) / cnt) - mean * mean).clamp_min(0)
                 x = ((x - mean[..., None, None]) * torch.rsqrt(var + m.eps)[..., None, None]
                      * parts[f'net.{i}.weight'][..., None, None] + parts[f'net.{i}.bias'][..., None, None])
             else:
