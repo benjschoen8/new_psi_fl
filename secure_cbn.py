@@ -47,7 +47,7 @@ import torch
 
 from evaluation import evaluate_global
 from label_union import index_metrics
-from label_union.oprf_union import oprf_union_with_keys, canonical
+from label_union.oprf_union import oprf_union_with_keys, canonical, pairs_union_with_keys, plain_pairs_grouping
 from secfl import kem, compress
 from secfl.bb import BulletinBoard
 from secfl.cbn_gan import ClientCBNGAN, trunk_state, rows, set_rows, load_trunk, _is_row
@@ -183,8 +183,38 @@ def _domains(samples, names):
     return [client_codes(s, l)[0] for s, l in zip(samples, names)]
 
 
-def cbn_union(names, dictionary, ids, workers=1, samples=None, say=lambda *_: None):
+def _image_sets(samples, names, image):
+    """image = (k, t): per client {label: its k nearest public image anchors} (t-out-of-k matching),
+    or None (no images, or image=None: the one-code check of _domains)."""
+    if samples is None or not image:
+        return None
+    from label_union.domain import client_sets
+    return [client_sets(s, l, image[0]) for s, l in zip(samples, names)]
+
+
+def _pairs_result(names, dictionary, ids, keys, sets, t, secure, workers, method, say, t0):
+    """Union with t-out-of-k image matching (label_union.oprf_union.pairs_union_with_keys); secure=False:
+    the same grouping in the clear (Plain-GeFL)."""
+    if secure:
+        index, sks, pks, info = pairs_union_with_keys(keys, sets, t, workers=workers)
+        U = len(pks)
+    else:
+        (index, U), sks, pks = plain_pairs_grouping(keys, sets, t), None, None
+        info = dict(setup_upload_bytes_per_client=0, setup_download_bytes_per_client=0)
+    info = dict(info, method=method, image_match=f'{t}-of-{len(next(iter(sets[0].values())))}',
+                seconds=time.perf_counter() - t0)
+    metrics = index_metrics(names, index, U, dictionary)
+    say(f"[setup] {method} union done in {info['seconds']:.1f}s: {U} labels; exact={metrics['exact']}")
+    return dict(index=index, sks=sks, pks=pks, U=U, metrics=metrics, view=_view(names, index, ids, U), info=info)
+
+
+def cbn_union(names, dictionary, ids, workers=1, samples=None, say=lambda *_: None, image=None):
     """OPRF union with KEM keys. Returns a dict stored in checkpoints (never recomputed on resume)."""
+    sets = _image_sets(samples, names, image)
+    if sets:
+        say(f'[setup] label union: {len(ids)}-party OPRF tags + SecAgg, image match {image[1]}-of-{image[0]} ...')
+        return _pairs_result(names, dictionary, ids, [{x: x for x in l} for l in names], sets, image[1], True,
+                             workers, 'oprf-pairs', say, time.perf_counter())
     domains = _domains(samples, names)
     say(f'[setup] label union: {len(ids)}-party OPRF tags + SecAgg{" + image check" if domains else ""} ...')
     t = time.perf_counter()
@@ -197,8 +227,12 @@ def cbn_union(names, dictionary, ids, workers=1, samples=None, say=lambda *_: No
     return dict(index=index, sks=sks, pks=pks, U=U, metrics=metrics, view=_view(names, index, ids, U), info=info)
 
 
-def plain_union(names, dictionary, ids, samples=None, say=lambda *_: None):
+def plain_union(names, dictionary, ids, samples=None, say=lambda *_: None, image=None):
     """Plain-GeFL: union of (canonical name, image code) in the clear, no keys."""
+    sets = _image_sets(samples, names, image)
+    if sets:
+        return _pairs_result(names, dictionary, ids, [{x: canonical(x).decode() for x in l} for l in names], sets,
+                             image[1], False, 0, 'plain-pairs', say, time.perf_counter())
     domains = _domains(samples, names)
     t = time.perf_counter()
     key = lambda i, x: canonical(x) + (b'\x00' + domains[i][x].encode() if domains else b'')
@@ -212,19 +246,46 @@ def plain_union(names, dictionary, ids, samples=None, say=lambda *_: None):
     return dict(index=index, sks=None, pks=None, U=U, metrics=metrics, view=_view(names, index, ids, U), info=info)
 
 
+def circuit_union(names, dictionary, ids, keywords=None, workers=1, samples=None, say=lambda *_: None,
+                  image=(6, 2), secure=True, tau=None):
+    """Label union by circuit PSI (label_union.circuit_union): grouping inside an honest-majority MPC of the
+    clients (exact names, or fuzzy keywords by CSLS distance when keywords are given; plus t-of-k image
+    anchors), then the bucket-union and pk SecAggs. secure=False: the same grouping in the clear."""
+    from label_union.circuit_union import circuit_union_with_keys, TAU
+    sets = _image_sets(samples, names, image)
+    fuzzy = keywords is not None
+    kw = keywords if fuzzy else [{x: x for x in l} for l in names]
+    t0 = time.perf_counter()
+    say(f"[setup] label union: circuit PSI ({'fuzzy' if fuzzy else 'exact'} keywords"
+        f"{f', image {image[1]}-of-{image[0]}' if sets else ''}) + SecAgg ...")
+    index, sks, pks, U, info = circuit_union_with_keys(names, kw, sets, fuzzy, TAU if tau is None else tau,
+                                                       image[1] if sets else 2, workers=workers, secure=secure)
+    info = dict(info, method=info['method'] + ('-fuzzy' if fuzzy else ''), seconds=time.perf_counter() - t0,
+                image_match=f'{image[1]}-of-{image[0]}' if sets else 'off')
+    metrics = index_metrics(names, index, U, dictionary)
+    say(f"[setup] circuit-PSI union done in {info['seconds']:.1f}s: {U} labels; exact={metrics['exact']}"
+        + (f"; MPC (estimated) {info['mpc']['mults'] / 1e6:.1f}M mults, "
+           f"{info['mpc']['bytes_per_client'] / 1e6:.0f} MB/client" if 'mpc' in info else ''))
+    return dict(index=index, sks=sks, pks=pks, U=U, metrics=metrics, view=_view(names, index, ids, U), info=info)
+
+
 def fuzzy_union(names, dictionary, ids, keywords, workers=1, samples=None, say=lambda *_: None, fuzzy=None,
-                secure=True):
+                secure=True, image=None):
     """No dictionary: keywords = per client {label: its own keyword, any language}. Each client snaps
     its keywords to public anchor classes locally (label_union.fuzzy_union), then the exact OPRF
     union runs on the class ids: same leakage as exact. names are only the ground truth for the
     experimenter's metrics. secure=False: the same grouping in the clear (Plain-GeFL)."""
     from label_union import fuzzy_union as fz
     p = dict(fz.params(), **(fuzzy or {}))
-    domains = _domains(samples, names)
+    sets = _image_sets(samples, names, image)
+    domains = None if sets else _domains(samples, names)
     say(f"[setup] fuzzy union: {p['anchors']} anchors, merge={p['merge']}, floor={p['floor']}"
-        f"{' + image check' if domains else ''} ...")
+        f"{f' + image match {image[1]}-of-{image[0]}' if sets else ' + image check' if domains else ''} ...")
     t = time.perf_counter()
     keys = fz.local_keys(names, keywords, p, domains)                    # each client, locally
+    if sets:
+        return _pairs_result(names, dictionary, ids, keys, sets, image[1], secure, workers,
+                             'fuzzy-anchor-pairs' if secure else 'plain-fuzzy-pairs', say, t)
     local = time.perf_counter() - t
     index, sks, pks, U, stats = fz.union(keys, workers=workers, secure=secure)
     info = dict(stats, method='fuzzy-anchor' if secure else 'plain-fuzzy', fuzzy=p, local_seconds=local,
@@ -357,7 +418,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         save_every=1, keep_all=False, resume=None, seed=0, progress=False, on_resume=None, domain_check=True,
         samples_per_label=16, union_result=None, quantize=True, keep_frac=0.1, quant_scale0=0.05,
         min_holders=2, warmup_epochs=0, union='exact', keywords=None, fuzzy=None, generator_cache=None,
-        cache_every=5, guide_factory=None, guide_epochs=5, guide_weight=.5, client_procs=None):
+        cache_every=5, guide_factory=None, guide_epochs=5, guide_weight=.5, client_procs=None, image_match=(6, 2), label_psi='circuit', circuit_tau=None):
     """gen_factory(num_rows) -> CBN generator; disc_factory(k) -> local D over k labels.
     agg: 'secagg' (the protocol) or 'plain' (Plain-GeFL, no cryptography).
     union_result: reuse a cbn_union() output (the OPRF indices are random per run).
@@ -587,11 +648,15 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                    if domain_check and union_result is None else None)
         if union_result is not None:
             Un = union_result
+        elif label_psi == 'circuit':
+            Un = circuit_union(names, dictionary, ids, keywords if union == 'fuzzy' else None, workers, samples,
+                               say, image_match, agg == 'secagg', circuit_tau)
         elif union == 'fuzzy':
-            Un = fuzzy_union(names, dictionary, ids, keywords, workers, samples, say, fuzzy, agg == 'secagg')
+            Un = fuzzy_union(names, dictionary, ids, keywords, workers, samples, say, fuzzy, agg == 'secagg',
+                             image_match)
         else:
-            Un = (cbn_union(names, dictionary, ids, workers, samples, say) if agg == 'secagg'
-                  else plain_union(names, dictionary, ids, samples, say))
+            Un = (cbn_union(names, dictionary, ids, workers, samples, say, image_match) if agg == 'secagg'
+                  else plain_union(names, dictionary, ids, samples, say, image_match))
         if agg == 'secagg' and Un['pks'] is None:
             raise ValueError('secagg needs an OPRF union with keys (union_result from cbn_union)')
     U, index = Un['U'], Un['index']

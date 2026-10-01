@@ -18,6 +18,7 @@ Every round:
   python -m secure_code_no_cluster --devices cuda:0,cuda:1 --workers 4 --agg secagg --rounds 45
   python -m secure_code_no_cluster --resume runs/<run>/checkpoint_last.pt --rounds 60      # continue a run
 """
+import argparse
 import hashlib
 import json
 import time
@@ -394,10 +395,20 @@ def main():
                    help='secagg: the protocol; plain: no cryptography (with --gen cbn: Plain-GeFL baseline, '
                         'plaintext union, rows handed out directly, same model and update rule)')
     p.add_argument('--gen', choices=('cbn', 'code'), default='cbn',
-                   help='cbn: shared trunk + per-label conditional-BatchNorm rows, rows sent by KEM so only '
-                        'holders get them (secure_cbn, needs --union oprf); code: fixed public label codes')
+                   help='cbn: one row per label (its whole generator, or its CBN row with --no-per-label-gen), '
+                        'rows sent by KEM so only holders get them (secure_cbn, needs --union oprf); '
+                        'code: fixed public label codes')
     p.add_argument('--no-domain-check', action='store_true', help='oprf union: names only, no image check')
     p.add_argument('--samples-per-label', type=int, default=16, help='images per label for the domain check')
+    p.add_argument('--label-psi', choices=('circuit', 'oprf'), default='circuit',
+                   help='cbn label union: circuit = grouping inside an MPC of the clients (circuit PSI), then '
+                        'bucket-union and pk SecAggs; oprf = ring OPRF tags (+ anchor-pair graph for images)')
+    p.add_argument('--circuit-tau', type=float, default=None,
+                   help='--label-psi circuit, fuzzy keywords: CSLS threshold (default label_union.circuit_union.TAU)')
+    p.add_argument('--image-match', default='6,2',
+                   help='cbn, image side of the union: k,t = a label is described by its k nearest public image '
+                        'anchors and two labels with the same keyword match if they share >= t (t-out-of-k); '
+                        'off: one coarse image code (strokes / photo) per label')
     p.add_argument('--union', choices=('oprf', 'fuzzy', 'mpc', 'secagg'), default='oprf',
                    help='label union: oprf = PSI-style n-party OPRF tags + SecAgg on the label names (default); '
                         'fuzzy = no shared names: every client names its labels with its own keyword in its own language '
@@ -439,8 +450,9 @@ def main():
     p.add_argument('--no-fused-adam', action='store_true', help='CUDA: the default (unfused) Adam')
     p.add_argument('--no-tensor-loader', action='store_true',
                    help='decode images with the torchvision DataLoader every epoch (slow; same numbers)')
-    p.add_argument('--per-label-gen', action='store_true',
-                   help='cbn: one whole generator per label (no shared trunk) instead of trunk + CBN rows')
+    p.add_argument('--per-label-gen', action=argparse.BooleanOptionalAction, default=True,
+                   help='cbn: one whole generator per label, no shared trunk (default); '
+                        '--no-per-label-gen: shared trunk + one CBN row per label')
     p.add_argument('--gen-widths', default='64,32,16', help='--per-label-gen: DCGAN widths of each label generator')
     p.add_argument('--min-holders', type=int, default=2,
                    help='cbn: a label row is updated only if at least this many clients contributed')
@@ -553,7 +565,10 @@ def main():
                                 union='fuzzy' if args.union == 'fuzzy' else 'exact', keywords=keywords, fuzzy=fuzzy,
                                 guide_factory=guide_f if args.heter else None, guide_epochs=args.guide_epochs,
                                 guide_weight=args.guide_weight,
-                                client_procs={'auto': None, 'on': True, 'off': False}[args.client_procs], **common)
+                                client_procs={'auto': None, 'on': True, 'off': False}[args.client_procs],
+                                image_match=None if args.image_match == 'off' else
+                                tuple(int(v) for v in args.image_match.split(',')),
+                                label_psi=args.label_psi, circuit_tau=args.circuit_tau, **common)
     else:
         result = run(clients, spaces, tests, gen_f, disc_f, cls_f, config, dictionary, code_dim=code_dim,
                      union=args.union, **common)

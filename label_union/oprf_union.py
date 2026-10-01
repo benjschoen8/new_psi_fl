@@ -24,7 +24,9 @@ code says what kind of picture the label's samples are (strokes vs photo ...), c
 against synthetic public anchors. A digit "cat" and a photo "cat" then get different indices.
 """
 import hashlib
+import itertools
 import secrets
+import struct
 import time
 import unicodedata
 
@@ -155,6 +157,31 @@ def slot_key(tag: bytes) -> int:
 PK_CHUNKS = 16                          # a 32-byte pk as 16 x 16-bit chunks
 
 
+def _pk_secagg(entries, U, session, workers, sa):
+    """entries: per client {slot: sk} (every holder of a slot has the same sk). One SecAgg of U x 17
+    words gives the Aggregator pk_0..pk_{U-1} and nothing else: every holder of slot k writes r and
+    r*c_j (mod 2^64) for the 16 16-bit chunks c_j of pk_k, r uniform; A = sum r = 2^s a' (a' odd) gives
+    c_j = (B_j / 2^s) a'^-1 mod 2^(64-s), exact while s <= 48 (else redo, prob 2^-48). A is uniform
+    whatever the number of holders, so it hides the count. Non-holders write zeros."""
+    n = len(entries)
+    chunks = [{k: [int(c) for c in np.frombuffer((rg.BASE * sk).encode(), '>u2')] for k, sk in own.items()}
+              for own in entries]
+    for attempt in range(4):
+        vectors = {}
+        for i, own in enumerate(chunks):
+            v = np.zeros((U, PK_CHUNKS + 1), np.uint64)
+            for k, cs in own.items():
+                r = secrets.randbits(64)
+                v[k] = [r] + [(r * c) % (1 << 64) for c in cs]
+            vectors[i] = v.ravel()
+        total, _ = run_secagg(vectors, threshold=max(2, -(-2 * n // 3)), modulus_bits=64,
+                              session=session + b'/%d' % attempt, workers=workers, stats=sa)
+        pks = [decode_pk([int(w) for w in row]) for row in total.reshape(U, PK_CHUNKS + 1)]
+        if all(p is not None for p in pks):
+            return pks
+    raise RuntimeError('pk aggregation failed 4 times: holders disagree on a pk')
+
+
 def decode_pk(row):
     """[A, B_1..B_16] (mod 2^64 sums) -> 32-byte pk, or None if A has >48 factors of 2 (redo)."""
     A = row[0]
@@ -191,25 +218,9 @@ def oprf_union_with_keys(client_labels, workers=1, bucket_bits=BUCKET_BITS, doma
     T = tags(client_labels, None, workers, domains)
     index, U, stats = _union_from_tags(T, workers, bucket_bits, session)
     keys = [{x: slot_key(v) for x, v in own.items()} for own in T]
-    chunks = [{x: [int(c) for c in np.frombuffer((rg.BASE * sk).encode(), '>u2')] for x, sk in own.items()}
-              for own in keys]
-    n = len(keys)
-    for attempt in range(4):
-        vectors = {}
-        for i, idx in enumerate(index):
-            v = np.zeros((U, PK_CHUNKS + 1), np.uint64)
-            for x, cs in chunks[i].items():
-                r = secrets.randbits(64)
-                v[idx[x]] = [r] + [(r * c) % (1 << 64) for c in cs]
-            vectors[i] = v.ravel()
-        total, _ = run_secagg(vectors, threshold=max(2, -(-2 * n // 3)), modulus_bits=64,
-                              session=session + b'/pk/%d' % attempt, workers=workers, stats=stats['secagg'])
-        pks = [decode_pk([int(w) for w in row]) for row in total.reshape(U, PK_CHUNKS + 1)]
-        if all(p is not None for p in pks):
-            break
-    else:
-        raise RuntimeError('pk aggregation failed 4 times: holders disagree on a pk')
-    m = max(len(l) for l in client_labels)
+    pks = _pk_secagg([{idx[x]: sk for x, sk in own.items()} for idx, own in zip(index, keys)], U,
+                     session + b'/pk', workers, stats['secagg'])
+    n, m = len(T), max(len(l) for l in client_labels)
     sa = stats['secagg']
     stats.update(seconds=time.perf_counter() - t, pk_upload_bytes_per_client=8 * U * (PK_CHUNKS + 1),
                  # every padded list of m points (32 B) makes n hops: n*m*32 bytes sent per client
@@ -217,3 +228,151 @@ def oprf_union_with_keys(client_labels, workers=1, bucket_bits=BUCKET_BITS, doma
                  setup_upload_bytes_per_client=n * m * 32 + (sa['payload_up'] + sa['control_up']) / n,
                  setup_download_bytes_per_client=n * m * 32 + sa['control_down'] / n + U * (4 + 32))   # + index list, pks
     return index, keys, pks, stats
+
+
+# ------------------------------------------------------------------ t-out-of-k image matching
+IMG = '\x00img:'
+
+
+def subsets(anchors, t=2):
+    """The t-subsets of a label's k nearest image anchors (label_union.domain.anchor_set), as strings."""
+    return [','.join(map(str, c)) for c in itertools.combinations(sorted(anchors), t)]
+
+
+def _seal(pk: bytes, info: bytes, data: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from secfl.kem import encaps
+    enc, k = encaps(pk, info)
+    nonce = secrets.token_bytes(12)
+    return enc + nonce + AESGCM(k).encrypt(nonce, data, info)
+
+
+def _open(sk: int, pk: bytes, info: bytes, blob: bytes) -> bytes:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from secfl.kem import decaps
+    return AESGCM(decaps(sk, blob[:32], pk, info)).decrypt(blob[32:44], blob[44:], info)
+
+
+def components(M, i, j):
+    """Connected components of a graph on 0..M-1 with edges (i[e], j[e]) -> group id per vertex,
+    groups numbered by their smallest vertex."""
+    parent = list(range(M))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    for a, b in zip(i, j):
+        ra, rb = find(int(a)), find(int(b))
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    roots = [find(a) for a in range(M)]
+    order = {r: g for g, r in enumerate(sorted(set(roots)))}
+    return [order[r] for r in roots]
+
+
+def plain_pairs_grouping(client_keys, client_sets, t=2):
+    """Plain-GeFL / ground truth: the same grouping in the clear. Two labels share a row iff they are
+    joined by a chain of labels with the same key whose anchor sets share >= t anchors.
+    Returns (index per client {label: group}, U)."""
+    items = sorted({(kw, s) for keys, sets in zip(client_keys, client_sets) for x, kw in keys.items()
+                    for s in subsets(sets[x], t)})
+    pos = {v: p for p, v in enumerate(items)}
+    i, j = [], []
+    for keys, sets in zip(client_keys, client_sets):
+        for kw in set(keys.values()):
+            ps = sorted({pos[kw, s] for x, k in keys.items() if k == kw for s in subsets(sets[x], t)})
+            i += [ps[0]] * (len(ps) - 1)
+            j += ps[1:]
+    group = components(len(items), i, j)
+    index = [{x: group[pos[kw, subsets(sets[x], t)[0]]] for x, kw in keys.items()}
+             for keys, sets in zip(client_keys, client_sets)]
+    return index, max(group) + 1
+
+
+def pairs_union_with_keys(client_keys, client_sets, t=2, workers=1, bucket_bits=BUCKET_BITS,
+                          session=b'label-union-pairs'):
+    """Label union with t-out-of-k image matching (fuzzy on the image side), one row + KEM key per group.
+
+    client_keys  per client {label: key}   (exact: the name; fuzzy: its anchor key; labels of one client
+                                            with the same key share a row)
+    client_sets  per client {label: its k nearest public image anchors} (label_union.domain.client_sets)
+    Two labels share a row iff their keys are equal and their anchor sets share >= t anchors, closed
+    under chains (A~B, B~C -> one row): the relation is not transitive, so the Aggregator joins the
+    matches into connected groups without learning names, holders or holder counts:
+
+    1. ring OPRF   tags of the key (T_kw) and of every t-subset s of the anchor set (T_s = OPRF(key|s))
+    2. SecAgg #1   bucket union of the subset tags (as oprf_union): M occupied buckets, published;
+                   each client knows the positions of its own subset tags
+    3. SecAgg #2   edges: every label writes a random word on (first, p) for each other position p of
+                   its subset tags (upper triangle of an M x M matrix). The sum shows the Aggregator
+                   which buckets lie in one label, never by whom or how many times
+    4. Aggregator  connected components = groups 0..U-1 (by smallest bucket); a random nonce per group
+    5. SecAgg #3   pk of every bucket (sk_b = slot_key(T_s), as _pk_secagg); the Aggregator seals
+                   (group, nonce) to every bucket's pk: only holders of a subset tag can open it
+    6. clients     open one of their buckets -> group; sk = H(T_kw | nonce): only members know both
+                   (the Aggregator has the nonce, not T_kw; another group with the same key lacks the nonce)
+    7. SecAgg #4   pk of every group (_pk_secagg)
+    Leakage beyond U: everyone learns M; the Aggregator also the bucket graph (how subset buckets
+    co-occur in labels). Semi-honest, as the rest of the union.
+    Returns (index per client {label: group}, sks per client {label: sk}, pks per group, stats)."""
+    t0 = time.perf_counter()
+    n = len(client_keys)
+    units = []                                                          # per client {key: {subset}}
+    for keys, sets in zip(client_keys, client_sets):
+        u = {}
+        for x, kw in keys.items():
+            u.setdefault(kw, set()).update(subsets(sets[x], t))
+        units.append(u)
+    if any(not ss for u in units for ss in u.values()):
+        raise ValueError(f'every label needs >= {t} image anchors')
+    items = [list(u) + [kw + IMG + s for kw, ss in u.items() for s in sorted(ss)] for u in units]
+    T = tags(items, None, workers)                                      # 1. one ring for everything
+    tag_seconds = time.perf_counter() - t0
+    sub = [{it: v for it, v in own.items() if IMG in it} for own in T]
+    pos, M, stats = _union_from_tags(sub, workers, bucket_bits, session + b'/union')     # 2.
+    sa = stats['secagg']
+    tri = np.triu_indices(M, 1)
+    E = len(tri[0])
+    edge = lambda a, b: a * M - a * (a + 1) // 2 + (b - a - 1)
+    vectors, first = {}, []
+    for c, u in enumerate(units):                                       # 3. star edges per label
+        v, f = np.zeros(E, np.uint64), {}
+        for kw, ss in u.items():
+            ps = sorted(pos[c][kw + IMG + s] for s in ss)
+            f[kw] = ps[0]
+            if len(ps) > 1:
+                v[[edge(ps[0], p) for p in ps[1:]]] = np.frombuffer(secrets.token_bytes(8 * (len(ps) - 1)), np.uint64)
+        vectors[c] = v
+        first.append(f)
+    total = (run_secagg(vectors, threshold=max(2, -(-2 * n // 3)), modulus_bits=64,
+                        session=session + b'/edges', workers=workers, stats=sa)[0] if E else np.zeros(0, np.uint64))
+    nz = np.flatnonzero(total)
+    group = components(M, tri[0][nz], tri[1][nz])                       # 4. Aggregator
+    U = max(group) + 1
+    nonce = [secrets.token_bytes(16) for _ in range(U)]
+    bucket_sk = [{pos[c][it]: slot_key(v) for it, v in own.items()} for c, own in enumerate(sub)]
+    bucket_pk = _pk_secagg(bucket_sk, M, session + b'/bucket-pk', workers, sa)     # 5.
+    sealed = [_seal(bucket_pk[b], b'pairs-group/%d' % b, struct.pack('>I', group[b]) + nonce[group[b]])
+              for b in range(M)]                                        # posted on the BB
+    index, sks = [], []
+    for c, u in enumerate(units):                                       # 6. each client, locally
+        gk = {}
+        for kw in u:
+            b = first[c][kw]
+            msg = _open(bucket_sk[c][b], bucket_pk[b], b'pairs-group/%d' % b, sealed[b])
+            g = struct.unpack('>I', msg[:4])[0]
+            gk[kw] = (g, rg.hash_to_scalar(T[c][kw] + msg[4:], b'label-union-group-sk-v1'))
+        index.append({x: gk[kw][0] for x, kw in client_keys[c].items()})
+        sks.append({x: gk[kw][1] for x, kw in client_keys[c].items()})
+    pks = _pk_secagg([{gk: sk for gk, sk in zip(idx.values(), sk_.values())} for idx, sk_ in zip(index, sks)],
+                     U, session + b'/pk', workers, sa)                  # 7.
+    m = max(len(i) for i in items)
+    stats.update(seconds=time.perf_counter() - t0, tag_seconds=tag_seconds, image_t=t, buckets=M, edges=int(len(nz)),
+                 ring_bytes_per_client=n * m * 32, edge_upload_bytes_per_client=8 * E,
+                 sealed_download_bytes_per_client=sum(map(len, sealed)),
+                 setup_upload_bytes_per_client=n * m * 32 + (sa['payload_up'] + sa['control_up']) / n,
+                 setup_download_bytes_per_client=n * m * 32 + sa['control_down'] / n + M * 4
+                 + sum(map(len, sealed)) + (M + U) * 32)
+    return index, sks, pks, stats

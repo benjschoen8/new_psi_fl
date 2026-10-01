@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Whole no-cluster paper experiment in one command (resumable: just run it again after a crash).
+# Whole no-cluster paper experiment in one command (resumable: RESUME=latest after a crash).
 #
 #   phase 1  accuracy: Plain-GeFL, Ours (exact PSI) and Ours (fuzzy PSI), ROUNDS rounds each, all at once
 #   phase 2  cost: plain / ours-uncompressed / ours, TIME_ROUNDS rounds each, one at a time (clean timings)
@@ -7,6 +7,8 @@
 #   phase 4  figures (tests/plot_paper.py) + a summary table
 #
 #   bash run_experiments.sh                                   # everything with defaults
+#   GEN=cbn bash run_experiments.sh                           # shared trunk + CBN rows instead of the
+#                                                             # default: one whole generator per label
 #   DEVICE=cuda WORKERS=8 ABLATIONS=1 bash run_experiments.sh
 #   tmux new -s exp 'bash run_experiments.sh'                 # keeps running after you disconnect
 #
@@ -41,6 +43,9 @@ else
     OUT=${OUT:-runs/base}_$(date +%Y%m%d-%H%M)          # OUT is optional: just a name prefix
 fi
 EXTRA=${EXTRA:-}                   # extra CLI flags for every run, e.g. EXTRA="--smoke" for a dry run
+GEN=${GEN:-perlabel}               # perlabel (default): one whole DCGAN per label; cbn: trunk + CBN rows
+[[ $GEN == cbn ]] && EXTRA="--no-per-label-gen $EXTRA"
+[[ -n ${GEN_WIDTHS:-} ]] && EXTRA="--gen-widths $GEN_WIDTHS $EXTRA"   # per-label DCGAN widths (64,32,16)
 # clients: one per dataset (MNIST, EMNIST, CIFAR-10); most labels then have one holder, so a row is
 # updated from a single client (--min-holders 1). emnist10_run_experiments.sh sets its own DATA.
 DATA=${DATA:---num-train-mnist 1 --num-train-emnist 1 --num-train-cifar10 1 --min-holders 1}

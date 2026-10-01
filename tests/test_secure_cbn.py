@@ -299,7 +299,7 @@ class CBNFuzzyTests(unittest.TestCase):
 
     def setUp(self):
         from unittest import mock
-        from label_union import encoder, fuzzy_union
+        from label_union import encoder, fuzzy_union, circuit_union
         rng = np.random.default_rng(0)
         center = {c: rng.standard_normal(32) for c in self.WORDS}
         unit = lambda v: v / np.linalg.norm(v)
@@ -308,7 +308,8 @@ class CBNFuzzyTests(unittest.TestCase):
         self.patches = [mock.patch.object(encoder, 'embed', lambda texts, model=None, cache_dir=None:
                                           np.array([vec[t] for t in texts])),
                         mock.patch.object(fuzzy_union, 'load_anchors', lambda model, n, merge, hub=0:
-                                          (A, fuzzy_union.anchor_classes(A, merge), fuzzy_union.hub_penalty(A, hub)))]   # 2 synonyms per concept
+                                          (A, fuzzy_union.anchor_classes(A, merge), fuzzy_union.hub_penalty(A, hub))),   # 2 synonyms per concept
+                        mock.patch.object(circuit_union, 'hub_anchors', lambda model: A)]
         for p in self.patches:
             p.start()
 
