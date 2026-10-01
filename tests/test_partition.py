@@ -37,6 +37,15 @@ class PartitionEvenTests(unittest.TestCase):
             for seed in range(20):
                 self.check(y, yt, n, seed, holders)
 
+    def test_full_share_gives_every_holder_all_images_of_its_classes(self):
+        y, yt = emnist_like()
+        split_own = partition_even(y, yt, 10, 0)[0]
+        own, tr, te = partition_even(y, yt, 10, 0, full=True)
+        self.assertEqual(own, split_own)                                     # same classes as the split
+        for split, labels in ((tr, y), (te, yt)):
+            for i in range(10):
+                self.assertEqual(sorted(split[i]), np.flatnonzero(np.isin(labels, own[i])).tolist())
+
     def test_too_few_classes_per_client_is_a_clear_error(self):
         y, yt = emnist_like()
         with self.assertRaisesRegex(ValueError, 'no client'):

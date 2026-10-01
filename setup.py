@@ -128,6 +128,9 @@ def parser():
                    help='every client of a dataset holds LO..HI of its classes (even coverage, each class '
                         'split evenly among its holders) and knows only those labels; e.g. 8,20. '
                         '"even": every class held by 2 clients, classes and images spread evenly')
+    p.add_argument('--class-share', choices=('split', 'full'), default='split',
+                   help='--class-subsets: split = a class\'s images split evenly among its holders; '
+                        'full = every holder gets all images of its classes')
     p.add_argument('--noniid-partition', '--noniid_partition', default='dirichlet',
                    choices=('dirichlet', 'noniid_label', 'quantity_skew', 'quantity_skew_equalSize'))
     return p

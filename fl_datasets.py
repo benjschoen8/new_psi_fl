@@ -56,10 +56,11 @@ class ClassSubsetDataset(Dataset):
         return img, self.remap[int(y)]
 
 
-def partition_class_subsets(train_labels, test_labels, n_clients, lo, hi, seed, min_holders=2):
+def partition_class_subsets(train_labels, test_labels, n_clients, lo, hi, seed, min_holders=2, full=False):
     """Every client draws k in [lo, hi] classes; classes go to the least-covered ones first (random
     ties), so coverage is even; redrawn until every class has >= min_holders clients (if possible).
-    A class's train / test samples are split evenly at random among its holders.
+    A class's train / test samples are split evenly at random among its holders (full=True: every
+    holder gets all of them).
     Returns (classes per client (sorted global ids), train idcs, test idcs)."""
     train_labels, test_labels = np.asarray(train_labels), np.asarray(test_labels)
     C, rng = int(max(train_labels.max(), test_labels.max())) + 1, np.random.default_rng(seed)
@@ -73,10 +74,10 @@ def partition_class_subsets(train_labels, test_labels, n_clients, lo, hi, seed, 
             own.append(mine)
         if cover.min() >= min(min_holders, ks.sum() // C):
             break
-    return _split_among_holders(own, train_labels, test_labels, C, rng)
+    return _split_among_holders(own, train_labels, test_labels, C, rng, full)
 
 
-def partition_even(train_labels, test_labels, n_clients, seed, holders=2):
+def partition_even(train_labels, test_labels, n_clients, seed, holders=2, full=False):
     """Classes and images spread evenly: every class goes to exactly `holders` clients, every client
     gets the same number of classes (+-1) and about the same number of images (classes, largest first,
     go to the least-loaded clients with a free class slot: LPT scheduling). A class's samples are split
@@ -97,11 +98,12 @@ def partition_even(train_labels, test_labels, n_clients, seed, holders=2):
         load[pick] += share[c]
         for h in pick:
             own[h].append(c)
-    return _split_among_holders([np.sort(m) for m in own], train_labels, test_labels, C, rng)
+    return _split_among_holders([np.sort(m) for m in own], train_labels, test_labels, C, rng, full)
 
 
-def _split_among_holders(own, train_labels, test_labels, C, rng):
-    """A class's train / test samples split evenly at random among the clients holding it."""
+def _split_among_holders(own, train_labels, test_labels, C, rng, full=False):
+    """A class's train / test samples split evenly at random among the clients holding it
+    (full=True: every holder gets all of them)."""
     n = len(own)
     tr, te = {i: [] for i in range(n)}, {i: [] for i in range(n)}
     for c in range(C):
@@ -110,7 +112,7 @@ def _split_among_holders(own, train_labels, test_labels, C, rng):
             raise ValueError(f'class {c} has no client: too few classes per client to cover all {C}')
         for labels, out in ((train_labels, tr), (test_labels, te)):
             idx = rng.permutation(np.flatnonzero(labels == c))
-            for h, part in zip(holders, np.array_split(idx, len(holders))):
+            for h, part in zip(holders, [idx] * len(holders) if full else np.array_split(idx, len(holders))):
                 out[h] += part.tolist()
     return [m.tolist() for m in own], tr, te
 
@@ -317,12 +319,13 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
         )
 
         subsets = getattr(args, 'class_subsets', None)
+        full = getattr(args, 'class_share', 'split') == 'full'
         if subsets == 'even':                                          # own classes per client (no cache:
-            own, train_idcs, test_idcs = partition_even(train_labels, test_labels, n_clients, args.seed)
+            own, train_idcs, test_idcs = partition_even(train_labels, test_labels, n_clients, args.seed, full=full)
         elif subsets:                                                  # deterministic from the seed)
             lo, hi = map(int, subsets.split(','))
             own, train_idcs, test_idcs = partition_class_subsets(train_labels, test_labels, n_clients, lo, hi,
-                                                                 args.seed)
+                                                                 args.seed, full=full)
         if subsets:
             names = list(train_dataset.classes)
             client_loaders = []
