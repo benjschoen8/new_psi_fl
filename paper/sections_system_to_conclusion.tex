@@ -14,10 +14,10 @@ We consider a federated learning (FL) system with $n$ clients $\mathcal{C}=\{c_1
 aggregator $\Agg$ (the server). Client $c_i$ holds a private labelled dataset
 $D_i=\{(x,y)\}$ whose label set $\mathcal{Y}_i$ is \emph{its own}: clients may hold different datasets
 (e.g., MNIST, EMNIST, CIFAR-10), so label sets can overlap ($\mathcal{Y}_i\cap\mathcal{Y}_j\neq\emptyset$),
-be disjoint, and differ in size. Clients may also use heterogeneous classifier architectures, so
-parameter averaging of classifiers (FedAvg) is not possible; instead, following GeFL, clients
+be disjoint, and differ in size (\emph{label-heterogeneous} FL). Following GeFL, clients
 collaboratively train a \emph{conditional generator} $G(z,k)$ and $\Agg$ trains a global classifier
-$F$ on synthetic samples.
+$F$ on synthetic samples; clients share no classifier, so $F$ covers every class without any client
+holding all of them.
 
 A label is identified by a \emph{keyword} typed by its owner. In the \emph{exact} setting all owners of
 a class use the same name; in the \emph{fuzzy} setting owners use their own wording
@@ -229,8 +229,8 @@ the one-time setup costs \todo{17\,MB} upload per client.
 
 \section{Conclusion}
 \label{sec:conclusion}
-We presented a label-private generative FL protocol for clients with heterogeneous datasets and
-models. A multi-party OPRF with a SecAgg bucket union aligns labels without revealing names, holders or
+We presented a label-private generative FL protocol for label-heterogeneous clients that hold
+different datasets. A multi-party OPRF with a SecAgg bucket union aligns labels without revealing names, holders or
 holder counts; a fuzzy variant aligns differently worded labels by local mapping to public anchors, at
 no extra leakage. A CBN generator with KEM-sealed rows keeps each class's parameters with its holders,
 and compressed 16-bit secure aggregation keeps the per-round traffic close to non-private FL while
