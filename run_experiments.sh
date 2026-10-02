@@ -45,7 +45,7 @@ fi
 EXTRA=${EXTRA:-}                   # extra CLI flags for every run, e.g. EXTRA="--smoke" for a dry run
 GEN=${GEN:-perlabel}               # perlabel (default): one whole DCGAN per label; cbn: trunk + CBN rows
 [[ $GEN == cbn ]] && EXTRA="--no-per-label-gen $EXTRA"
-[[ -n ${GEN_WIDTHS:-} ]] && EXTRA="--gen-widths $GEN_WIDTHS $EXTRA"   # per-label DCGAN widths (64,32,16)
+[[ -n ${GEN_WIDTHS:-} ]] && EXTRA="--gen-widths $GEN_WIDTHS $EXTRA"   # per-label DCGAN widths (default 128,64,32)
 # clients: one per dataset (MNIST, EMNIST, CIFAR-10); most labels then have one holder, so a row is
 # updated from a single client (--min-holders 1). emnist10_run_experiments.sh sets its own DATA.
 DATA=${DATA:---num-train-mnist 1 --num-train-emnist 1 --num-train-cifar10 1 --min-holders 1}

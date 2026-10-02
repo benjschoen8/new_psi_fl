@@ -453,13 +453,19 @@ def main():
     p.add_argument('--per-label-gen', action=argparse.BooleanOptionalAction, default=True,
                    help='cbn: one whole generator per label, no shared trunk (default); '
                         '--no-per-label-gen: shared trunk + one CBN row per label')
-    p.add_argument('--gen-widths', default='64,32,16', help='--per-label-gen: DCGAN widths of each label generator')
+    p.add_argument('--gen-widths', default=None,
+                   help='--per-label-gen: DCGAN widths of each label generator (default 128,64,32, ~428k '
+                        'parameters per label; with --resume: the widths the run was started with)')
     p.add_argument('--min-holders', type=int, default=2,
                    help='cbn: a label row is updated only if at least this many clients contributed')
     p.add_argument('--keep-frac', type=float, default=0.1, help='cbn: coordinates uploaded per round (plain and secagg)')
     p.add_argument('--quant-scale0', type=float, default=0.05, help='cbn: first-round scale floor (plain and secagg)')
     p.add_argument('--fast-samples', type=int, default=256, help='per-client image cap under --fast')
     args = p.parse_args()
+    if args.gen_widths is None:                                      # a resumed run keeps its own widths
+        old = args.resume.parent / 'args.json' if args.resume else None
+        args.gen_widths = (json.loads(old.read_text()).get('gen_widths') if old and old.exists() else None) \
+            or '128,64,32'
     from setup import resolve_device
     args.device = resolve_device(args.device)
     seed_all(args.seed)

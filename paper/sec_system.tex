@@ -34,7 +34,7 @@ one class only if keywords \emph{and} images match. The $U$ resulting classes ar
 $[U]=\{0,\dots,U-1\}$ through maps $\mathrm{idx}_i:\mathcal{Y}_i\to[U]$.
 
 \emph{Learning.} As in GeFL~\cite{gefl}, no classifier is shared. Each class $g$ has its own DCGAN
-generator $G_{\theta_g}$, $\theta_g\in\mathbb{R}^P$ ($P\approx1.7\times10^5$), initialized to a public
+generator $G_{\theta_g}$, $\theta_g\in\mathbb{R}^P$ ($P\approx4.3\times10^5$), initialized to a public
 $\theta^{(0)}$. $C_i$ trains the generators of its classes against a local discriminator $D_i$;
 $\Agg$ averages each $\theta_g$ over its holders and trains a global classifier $F$ (ResNet-18) on
 $(G_{\theta_g}(z),g)$ for all $g\in[U]$.
