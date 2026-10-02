@@ -1,0 +1,238 @@
+% =============================================================================================
+%  Section after Preliminaries / Related Work: System Model and Proposed Scheme (IEEEtran, compact)
+%  Preamble needs: \usepackage{amsmath,amssymb,graphicx,algorithm,algpseudocode}
+%  Figures: upload the two-page figure PDF to Overleaf as figs/protocol_steps.pdf
+%  Replaces the old "System Model", "Threat Model and Design Goals" and "Proposed Scheme" sections.
+% =============================================================================================
+\providecommand{\Agg}{\mathsf{AGG}}
+\providecommand{\BB}{\mathsf{BB}}
+\providecommand{\SecAgg}{\mathsf{SecAgg}}
+\providecommand{\Seal}{\mathsf{Seal}}
+\providecommand{\Open}{\mathsf{Open}}
+\providecommand{\Fgrp}{\mathcal{F}_{\mathsf{grp}}}
+\providecommand{\sample}{\xleftarrow{\$}}
+\providecommand{\pp}{\mathsf{pp}}
+\algrenewcommand\algorithmicrequire{\textbf{Input:}}
+\algrenewcommand\algorithmicensure{\textbf{Output:}}
+
+\section{System Model and Proposed Scheme}
+\label{sec:system}
+
+\subsection{System Model}
+\label{sec:model}
+
+\emph{Entities.} $n\ge3$ clients $C_1,\dots,C_n$, one aggregator $\Agg$ (the only server) and a
+public, append-only bulletin board $\BB$. Clients have no direct links: client-to-client messages
+are end-to-end encrypted and relayed by $\Agg$.
+
+\emph{Data.} $C_i$ holds a private dataset with its own label set $\mathcal{Y}_i$; for
+$y\in\mathcal{Y}_i$, $X_i(y)$ are its images and $w_i(y)$ its keyword. Clients may hold different
+datasets (e.g., MNIST, EMNIST, CIFAR-10), so label sets overlap, are disjoint, or differ in size.
+Keywords are \emph{exact} (one name per class) or \emph{fuzzy} (own wording, e.g., ``car'' vs.\
+``automobile'', no shared dictionary). Equal names may denote different images, so two labels are
+one class only if keywords \emph{and} images match. The $U$ resulting classes are indexed by
+$[U]=\{0,\dots,U-1\}$ through maps $\mathrm{idx}_i:\mathcal{Y}_i\to[U]$.
+
+\emph{Learning.} As in GeFL~\cite{gefl}, no classifier is shared. Each class $g$ has its own DCGAN
+generator $G_{\theta_g}$, $\theta_g\in\mathbb{R}^P$ ($P\approx1.7\times10^5$), initialized to a public
+$\theta^{(0)}$. $C_i$ trains the generators of its classes against a local discriminator $D_i$;
+$\Agg$ averages each $\theta_g$ over its holders and trains a global classifier $F$ (ResNet-18) on
+$(G_{\theta_g}(z),g)$ for all $g\in[U]$.
+
+\emph{Threat model and goals.}\label{sec:threat} All parties are semi-honest; $\Agg$ does not collude
+with clients, and fewer than $n/2$ clients collude (honest majority). Clients stay online during
+the setup; rounds tolerate dropouts as SecAgg does~\cite{bonawitz2017practical}. We require:
+(G1)~$\Agg$ learns neither label names nor who holds which label; (G2)~fewer than $n/2$ clients
+learn nothing about other clients' labels beyond $U$; (G3)~only holders of class $g$ can read
+$\theta_g$; (G4)~$\Agg$ sees only sums of updates; (G5)~one index and key per class, synonyms
+included, but not for equal names with different images; (G6)~a one-time setup and a per-round cost
+close to GeFL. \emph{Accepted leakage:} $\Agg$ learns $U$, the occupied buckets, the public keys,
+the models, and per round the number $n_g$ of contributors to each class; clients learn $U$, their
+own outputs, the MPC's convergence bits (how many propagation steps the longest chain of matches
+needed, usually one), and whether their own $\theta_g$ was updated
+($n_g\ge t_h$).
+
+\emph{Public parameters $\pp$} (hash posted on $\BB$): the group $\mathbb{G}$ (ristretto255, order
+$L$, generator $B$) and SHA-256 based hashes $H_{\mathrm n}$, $H_{\mathrm b}^{\eta}$ (to $[2^\beta]$),
+$\mathrm{chk}^{\eta}$ (odd, 64-bit) and $H_{\mathrm{sk}}$, with public salt $\eta$; a \emph{keyword
+probe set}: encoder $E$, embeddings $\boldsymbol\epsilon_j$ of $N_w=2000$ anchor words, hub size
+$h=5$, threshold $\tau$, $f$ fixed-point bits; an \emph{image probe set}: $N_I=45$ seeded families
+of synthetic images with anchor signatures $\boldsymbol\xi_j$ under a signature $\sigma(\cdot)$
+(brightness, colourfulness and edge histograms, radial spectrum), $k=6$, $t=2$; and $m$, $T_p=1$,
+$t_h$, $\rho$, $\theta^{(0)}$. The probe sets hold no client data; they only give the clients a
+common space in which to compare keywords and images.
+
+\subsection{Setup: Private Label Union}
+\label{sec:setup}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth,page=1,trim=90 68 110 64,clip]{figs/protocol_steps.pdf}
+  \caption{Setup (once): (1)~circuit PSI; (2)~SecAgg of bucket vectors; (3)~union table posted;
+  (4)~indices; (5)~SecAgg of public keys, posted on $\BB$.}
+  \label{fig:setup}
+\end{figure}
+
+The setup (Fig.~\ref{fig:setup}, Alg.~\ref{alg:setup}) gives each client an index and a key per
+label, and $\Agg$ only $U$ and one public key per index. Only the grouping runs in MPC; all other
+steps are SecAgg with $\Agg$.
+
+\emph{Step 1: circuit PSI.} Each label becomes a row $(v_a,\phi_a,\mathbf{s}_a)$
+(Alg.~\ref{alg:rows}): a valid bit; a keyword feature (hashed name, single-letter symbol, or
+fixed-point embedding $\mathbf{e}_a$ with hub term $r_a$); and the indicator
+$\mathbf{s}_a\in\{0,1\}^{N_I}$ of the $k$ image anchors nearest to the label's mean signature.
+Dummy rows pad to $m$. Rows are Shamir-shared~\cite{shamir1979share} with degree
+$\lfloor(n-1)/2\rfloor$, and the clients evaluate $\Fgrp$ (Alg.~\ref{alg:group}) with an
+honest-majority protocol~\cite{damgard2007scalable}. For each pair of rows of different clients,
+\begin{equation}
+  \mu_{aa'}=v_a v_{a'}\,\big[\langle\mathbf{s}_a,\mathbf{s}_{a'}\rangle\ge t\big]\,
+  \mathrm{KW}(\phi_a,\phi_{a'}),
+  \label{eq:match}
+\end{equation}
+where $\mathrm{KW}$ is equality for names and symbols, and for embeddings the CSLS
+test~\cite{conneau2018word} $2\langle\mathbf{e}_a,\mathbf{e}_{a'}\rangle-r_a-r_{a'}\ge\tau$, which
+discounts hub words. Matching is not transitive, so $\Fgrp$ takes connected components by min-label
+propagation, carrying a joint random secret per row, and opens to each owner only the secret $K$ of
+its rows. A client's own rows are never compared with each other, but join one group through other
+clients' rows. Since one class is usually a clique of matches, $T_p=1$ step and one convergence
+check suffice; the first step uses the public row numbers, so it needs no secret comparisons. Rows of one class share $K$; nobody sees the matches or the groups, and since $K$ is
+random, $\Agg$ cannot test candidate names.
+
+\emph{Steps 2--4: union table.} Each client derives $\mathrm{sk}_K=H_{\mathrm{sk}}(K)$,
+$pk_K=\mathrm{sk}_K B$ and writes $(\alpha,\alpha\,\mathrm{chk}^{\eta}(K))$, $\alpha$ uniform in
+$\mathbb{Z}_{2^{64}}$, into bucket $H_{\mathrm b}^{\eta}(K)$. $\Agg$ obtains the SecAgg sum and posts
+the occupied buckets $O$; sums of uniform values hide holder counts. A bucket with two secrets
+fails $\Sigma_1=\mathrm{chk}^{\eta}(K)\,\Sigma_0$ (except w.p.\ ${\approx}2^{-60}$); the clients then
+rehash with the next salt, revealing only that a collision occurred. A label's index is the rank of
+its bucket in $O$, and $U=|O|$.
+
+\emph{Steps 5--6: public keys.} Each holder of $g$ writes $\alpha(1,c_1,\dots,c_{16})$, with $c_j$
+the 16-bit chunks of $pk_g$. From $\Psi_0=\sum\alpha=2^{\zeta}a'$ ($a'$ odd) and $\Psi_j=c_j\Psi_0$,
+$\Agg$ recovers $c_j=(\Psi_j/2^{\zeta})\,a'^{-1}\bmod 2^{64-\zeta}$ and posts $pk_g$; $\Psi_0$ again
+hides the count.
+
+\begin{algorithm}[t]
+\caption{$\mathsf{LocalRows}$, run by $C_i$ (no communication)}
+\label{alg:rows}
+\begin{algorithmic}[1]
+\Require $\mathcal{Y}_i$; $w_i(y)$, $X_i(y)$ for $y\in\mathcal{Y}_i$; $\pp$; mode $\in\{$exact, fuzzy$\}$
+\Ensure rows $R_i[1..m]$; row $a\le|\mathcal{Y}_i|$ belongs to label $y_a$
+\For{$a=1,\dots,|\mathcal{Y}_i|$}
+  \State $w\gets\mathrm{Norm}(w_i(y_a))$ \Comment{NFKC, numerals spelled out}
+  \If{mode $=$ exact}
+    \State $\phi_a\gets(\textsf{name},\,H_{\mathrm{n}}(w))$
+  \ElsIf{$w$ is a single Latin letter}
+    \State $\phi_a\gets(\textsf{sym},\,w)$ \Comment{case kept}
+  \Else
+    \State $\mathbf{e}\gets E(w)$;\ \ $r\gets\frac1h\sum_{j\in\mathrm{top}_h}\langle\mathbf{e},\boldsymbol{\epsilon}_j\rangle$
+    \State $\phi_a\gets(\textsf{emb},\,\lfloor2^{f}\mathbf{e}\rceil,\,\lfloor2^{2f}r\rceil)$ \Comment{fixed point}
+  \EndIf
+  \State $\bar{\boldsymbol\sigma}\gets\sigma\big(X_i(y_a)\big)$ \Comment{mean signature}
+  \State $\mathbf{s}_a[j]\gets1$ iff $\boldsymbol{\xi}_j$ is among the $k$ nearest to $\bar{\boldsymbol\sigma}$ (cosine), else $0$
+  \State $R_i[a]\gets(1,\ \phi_a,\ \mathbf{s}_a)$
+\EndFor
+\For{$a=|\mathcal{Y}_i|+1,\dots,m$}
+  \State $R_i[a]\gets(0,\ \mathbf{0},\ \mathbf{0})$ \Comment{dummy row}
+\EndFor
+\State \Return $R_i$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{$\Fgrp$: grouping, evaluated by the clients on Shamir shares}
+\label{alg:group}
+\begin{algorithmic}[1]
+\Require shared rows of all clients, $N=nm$ rows $(v_a,\phi_a,\mathbf{s}_a)$ with owners $o(a)$; $\tau$, $t$, $T_p$
+\Ensure $K_a$, opened to $o(a)$ only, for every row $a$
+\For{all pairs $a<a'$, $o(a)\neq o(a')$, \textbf{in parallel}} \Comment{else $\mu_{aa'}=0$}
+  \State $\mu_{aa'}\gets\mu_{a'a}\gets$ \eqref{eq:match} \Comment{never opened}
+\EndFor
+\For{$a=1,\dots,N$}
+  \State $\ell_a\gets a$;\quad $\kappa_a\sample\{0,1\}^{128}$ \Comment{joint randomness}
+\EndFor
+\Repeat
+  \For{$T_p$ steps, all $a$ \textbf{in parallel}}
+    \State $(\ell_a,\kappa_a)\gets$ pair with the least $\ell$ among $(\ell_a,\kappa_a)$ and $\{(\ell_{a'},\kappa_{a'}):\mu_{aa'}=1\}$
+  \EndFor
+  \State open $\chi\gets[\,$one more step would change some $\ell_a\,]$
+\Until{$\chi=0$}
+\State open $K_a\gets\kappa_a$ to $o(a)$ only, for all $a$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Setup: private label union and keys (Fig.~\ref{fig:setup})}
+\label{alg:setup}
+\begin{algorithmic}[1]
+\Require $\pp$, $H(\pp)$ on $\BB$; each $C_i$: $\mathcal{Y}_i$, $w_i$, $X_i$
+\Ensure $C_i$: $\mathrm{idx}_i$, $\mathrm{sk}_i$;\ \ $\Agg$, $\BB$: $O$, $U$, $pk_0,\dots,pk_{U-1}$
+\Statex \textit{Step 1: circuit PSI among the clients}
+\State each $C_i$: $R_i\gets\mathsf{LocalRows}(\cdot)$ (Alg.~\ref{alg:rows}); Shamir-share $R_i$, share $j$ encrypted to $C_j$ and relayed by $\Agg$
+\State clients evaluate $\Fgrp$ (Alg.~\ref{alg:group}); $C_i$ gets $K_a$ for its rows
+\State each $C_i$: drop dummies; $\mathcal{K}_i\gets\{K_a\}$; $\mathrm{sk}_K\gets H_{\mathrm{sk}}(K)$, $pk_K\gets\mathrm{sk}_K\cdot B$
+\Statex \textit{Steps 2--4: union table (SecAgg \#1)}
+\State $\eta\gets0$
+\Loop
+  \State each $C_i$: $\mathbf{y}_i\gets\mathbf{0}\in\mathbb{Z}_{2^{64}}^{2^{\beta}\times2}$
+  \For{$K\in\mathcal{K}_i$} \Comment{$\pi(K)=H_{\mathrm{b}}^{\eta}(K)$}
+    \State $\alpha\sample\mathbb{Z}_{2^{64}}$;\ \ $\mathbf{y}_i[\pi(K)]\gets(\alpha,\ \alpha\cdot\mathrm{chk}^{\eta}(K))$
+  \EndFor
+  \State $\Agg$: $\boldsymbol{\Sigma}\gets\SecAgg_{64}(\{\mathbf{y}_i\})$; post $O\gets\mathrm{sort}\{\pi:\boldsymbol{\Sigma}[\pi]\neq\mathbf{0}\}$ and $\boldsymbol{\Sigma}[O]$
+  \State each $C_i$: $\mathit{ok}_i\gets\bigwedge_{K\in\mathcal{K}_i}\big(\boldsymbol{\Sigma}[\pi(K)]_1=\mathrm{chk}^{\eta}(K)\,\boldsymbol{\Sigma}[\pi(K)]_0\neq0\big)$; announce $\mathit{ok}_i$
+  \If{$\mathit{ok}_i$ for all $i$} \textbf{break} \EndIf
+  \State $\eta\gets\eta+1$ \Comment{bucket collision: rehash}
+\EndLoop
+\State $U\gets|O|$;\ \ each $C_i$: $\mathrm{idx}(K)\gets$ rank of $\pi(K)$ in $O$
+\Statex \textit{Steps 5--6: public keys (SecAgg \#2)}
+\State each $C_i$: $\boldsymbol{\psi}_i\gets\mathbf{0}\in\mathbb{Z}_{2^{64}}^{U\times17}$; for $K\in\mathcal{K}_i$: $\alpha\sample\mathbb{Z}_{2^{64}}$, $\boldsymbol{\psi}_i[\mathrm{idx}(K)]\gets\alpha\,(1,c_1,\dots,c_{16})$, $c_j$ the 16-bit chunks of $pk_K$
+\State $\Agg$: $\boldsymbol{\Psi}\gets\SecAgg_{64}(\{\boldsymbol{\psi}_i\})$; decode $pk_g$ from $\boldsymbol{\Psi}[g]$ for all $g\in[U]$; post on $\BB$
+\State each $C_i$, $y\in\mathcal{Y}_i$: $\mathrm{idx}_i(y)\gets\mathrm{idx}(K_y)$, $\mathrm{sk}_i(y)\gets\mathrm{sk}_{K_y}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Training Rounds}
+\label{sec:rounds}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth,page=2,trim=8 68 106 8,clip]{figs/protocol_steps.pdf}
+  \caption{Every round: (1)~local training; (2)~one SecAgg of all updates; (3)~averaging, classifier
+  training, and sealed generators posted; (4)~clients open their own.}
+  \label{fig:round}
+\end{figure}
+
+Each round (Fig.~\ref{fig:round}, Alg.~\ref{alg:round}) has four steps. (1)~$C_i$ trains its
+generators for $E_\ell$ epochs. Round~1 starts from $\theta^{(0)}$, optionally after $E_w$ local
+warm-up epochs; the common $\theta^{(0)}$ lets warmed generators keep their weights under the new
+indices. (2)~Every client uploads one fixed-length vector over all $U$ classes, with zeros where it
+holds none, so uploads reveal nothing about its labels. On a public per-round subset
+$\mathcal{S}_r$ of $\rho P$ coordinates, updates are clipped by public scales $\gamma_g$ and
+stochastically rounded to 8 bits, with indicators $\mathbb{1}_{i,g}$; sums of $n\le258$ clients fit
+in $\mathbb{Z}_{2^{16}}$. (3)~From the sums, $\Agg$ updates $\theta_g$ by the mean over its $n_g$
+contributors if $n_g\ge t_h$, adapts $\gamma_g$ to the summed clip rates, trains $F$, and posts
+every $\theta_g$ sealed to $pk_g$ (DHKEM on ristretto255 with AES-GCM, as in HPKE~\cite{rfc9180};
+associated data $(r,g)$; payload: the 8-bit change since the last round). (4)~Every client downloads
+all $U$ equal-size ciphertexts and opens only its own, so its access pattern reveals no labels.
+
+\begin{algorithm}[t]
+\caption{Training round $r=1,\dots,R$ (Fig.~\ref{fig:round})}
+\label{alg:round}
+\begin{algorithmic}[1]
+\Require $C_i$: $\mathrm{idx}_i$, $\mathrm{sk}_i$, $\{\hat\theta_g\}$ of own classes; $\Agg$: $\{\theta_g\}_{g\in[U]}$, scales $\gamma_g$; $\BB$: $pk_0,\dots,pk_{U-1}$
+\Statex \textit{Step 1: local training}
+\State each $C_i$, $\mathcal{G}_i=\mathrm{idx}_i(\mathcal{Y}_i)$: train $\{G_{\hat\theta_g}\}_{g\in\mathcal{G}_i}$ vs.\ $D_i$ for $E_\ell$ epochs; $\Delta_{i,g}\gets\theta'_{i,g}-\hat\theta_g$
+\Statex \textit{Step 2: compressed SecAgg}
+\State $\mathcal{S}_r\subseteq[P]$, $|\mathcal{S}_r|=\rho P$, derived from $H(r)$ \Comment{public}
+\State each $C_i$: $\mathbf{u}_i\gets\big(Q(\Delta_{i,g}[\mathcal{S}_r]/\gamma_g),\ \mathbb{1}_{i,g}\big)_{g\in[U]}$ and clip rates \Comment{zeros if $g\notin\mathcal{G}_i$}
+\State $\Agg$: $\mathbf{S}\gets\SecAgg_{16}(\{\mathbf{u}_i\})$;\ \ $n_g\gets\sum_i\mathbb{1}_{i,g}$
+\Statex \textit{Step 3: server update, classifier, sealed downlink}
+\For{$g\in[U]$ with $n_g\ge t_h$}
+  \State $\theta_g[\mathcal{S}_r]\gets\theta_g[\mathcal{S}_r]+\frac{\gamma_g}{127\,n_g}\mathbf{S}_g$ \Comment{mean over contributors}
+\EndFor
+\State $\Agg$: adapt $\gamma_g$ to the summed clip rates
+\State $\Agg$: train $F$ for $E_s$ epochs on $(G_{\theta_g}(z),g)$, $z\sim\mathcal{N}(0,I)$, $g\in[U]$
+\State $\Agg$: post $\mathsf{ct}_g\gets\Seal\big(pk_g,(r,g),\theta_g\big)$ on $\BB$ for every $g\in[U]$
+\Statex \textit{Step 4: each client acquires its generators}
+\State each $C_i$: download all $\mathsf{ct}_0,\dots,\mathsf{ct}_{U-1}$; $\hat\theta_g\gets\Open\big(\mathrm{sk}_i(y),(r,g),\mathsf{ct}_g\big)$ for $g=\mathrm{idx}_i(y)$, $y\in\mathcal{Y}_i$
+\end{algorithmic}
+\end{algorithm}

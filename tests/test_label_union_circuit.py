@@ -45,6 +45,25 @@ class CircuitUnionTests(unittest.TestCase):
         self.assertNotEqual(index[0]['A'], index[1]['a'])
         self.assertEqual(U, 4)
 
+    def test_own_labels_not_compared_but_join_through_others(self):
+        alone = [['car', 'automobile']]
+        kws = lambda labels: [{x: x for x in l} for l in labels]
+        try:
+            _, _, _, U1, _ = circuit_union_with_keys(alone, kws(alone), fuzzy=True, secure=False)
+        except RuntimeError as e:                                                  # encoder cache missing
+            self.skipTest(str(e))
+        both = [['car', 'automobile'], ['car']]
+        index, _, _, U2, _ = circuit_union_with_keys(both, kws(both), fuzzy=True, secure=False)
+        self.assertEqual(U1, 2)                                                    # one client: never compared
+        self.assertEqual(U2, 1)                                                    # via client 1's 'car'
+        self.assertEqual(index[0]['car'], index[0]['automobile'])
+
+    def test_mpc_cost_one_step_cheaper(self):
+        from label_union.circuit_union import mpc_cost
+        one, eight = mpc_cost(6, 62, 384, 45, 1, 1), mpc_cost(6, 62, 384, 45, 8, 1)
+        self.assertEqual(one['propagation_steps'], 2)                              # 1 step + 1 check
+        self.assertLess(one['mults'], eight['mults'] / 2)
+
 
 if __name__ == '__main__':
     unittest.main()

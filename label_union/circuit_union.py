@@ -2,7 +2,7 @@
 usual two SecAggs give every row its index and KEM keys. One server (the Aggregator); semi-honest.
 
 Public: the encoder + 2000 anchor words (fuzzy keywords), the 45 seeded image anchors
-(label_union.domain), thresholds tau (keyword, CSLS) and t (shared image anchors), steps D, rows m.
+(label_union.domain), thresholds tau (keyword, CSLS) and t (shared image anchors), steps D per check (default 1), rows m.
 
   A  each client, locally, one row per label: its keyword (exact: the name; fuzzy: unit embedding e
      of the normalized keyword, fixed point, and its CSLS hub term r = mean cosine to its h nearest
@@ -10,17 +10,21 @@ Public: the encoder + 2000 anchor words (fuzzy keywords), the 45 seeded image an
      nearest image anchors as a 0/1 vector b; padded with dummy rows to m.
   B  Shamir-share every input among the n clients (degree < n/2); messages relayed by the Aggregator,
      encrypted client to client.
-  C  MPC (circuit PSI): for every pair of rows
+  C  MPC (circuit PSI): for every pair of rows of different clients (a client's own labels are
+     never compared directly; they still join one group through other clients' rows)
         match = valid_i valid_j [<b_i, b_j> >= t] [keywords match]
         keywords match = exact: name_i == name_j;  fuzzy: both symbols ? sym_i == sym_j :
                          (either a symbol ? 0 : 2<e_i, e_j> - r_i - r_j >= tau)
-     then connected components by min-label propagation (D steps + one revealed 'converged' bit),
-     each row carrying its root's random secret kappa. Output: K = kappa of the root, opened ONLY to
+     then connected components by min-label propagation: repeat (D steps, open one 'converged'
+     bit) until converged; one class is usually a clique, so with D = 1 one step plus one check.
+     The first step runs on the public row numbers (smallest matching row = first 1 of the row,
+     a prefix-OR), later steps compare secret labels. Each row carries its root's secret kappa. Output: K = kappa of the root, opened ONLY to
      the row's owner. Rows in one group share K; nobody sees the match matrix or the groups.
   D  each client, locally: rows of its own with the same K become one row; bucket b = H(K), sk = H'(K).
   E  SecAgg #1: bucket union over the K's (label_union.oprf_union._union_from_tags) -> index = rank.
   F  SecAgg #2: pk of every index (_pk_secagg).
-Leakage: Aggregator U and the pk list; any < n/2 clients: U, their own outputs, the 'converged' bit.
+Leakage: Aggregator U and the pk list; any < n/2 clients: U, their own outputs, the 'converged'
+bits (= how many propagation steps the longest chain of matches needed, usually 1).
 
 ponytail: step C runs here as its ideal functionality (the exact integer computation the MPC
 evaluates, on the same fixed-point inputs), so accuracy and indices are what the MPC would produce;
@@ -34,7 +38,8 @@ import numpy as np
 
 from label_union.oprf_union import _union_from_tags, _pk_secagg, slot_key, canonical, BUCKET_BITS
 
-FIX = 12                                  # fixed point: e * 2^12, dot products and r at 2^24
+FIX = 7                                   # fixed point: e * 2^7, dot products and r at 2^14 (CSLS
+                                          # resolution 6e-5; real-data groupings same as at 2^12)
 TAU = 0.10                                # CSLS threshold (CIFAR names: synonyms >= .21, others <= .01)
 HUB = 5                                   # CSLS: h nearest anchor words
 ANCHORS = 2000
@@ -86,9 +91,10 @@ def _kw_match(a, b, tau):
     return 2 * int(a[1] @ b[1]) - a[2] - b[2] >= int(round(tau * (1 << 2 * FIX)))
 
 
-def group(rows, tau=TAU, t=2):
+def group(rows, tau=TAU, t=2, owners=None):
     """Ideal functionality of step C on the real rows (dummies never match). rows: list of
-    (kw, img or None). Returns (group id per row, propagation steps the components need)."""
+    (kw, img or None); owners: client of each row (rows of one client are not compared).
+    Returns (group id per row, propagation steps the components need)."""
     N = len(rows)
     parent = list(range(N))
 
@@ -100,6 +106,8 @@ def group(rows, tau=TAU, t=2):
     adj = [[] for _ in range(N)]
     for i in range(N):
         for j in range(i + 1, N):
+            if owners is not None and owners[i] == owners[j]:
+                continue
             (ki, bi), (kj, bj) = rows[i], rows[j]
             if (bi is None or int(bi @ bj) >= t) and _kw_match(ki, kj, tau):
                 adj[i].append(j), adj[j].append(i)
@@ -121,23 +129,26 @@ def group(rows, tau=TAU, t=2):
 
 def mpc_cost(n, m, dim, n_img, D, steps, field_bytes=8):
     """Operation count of step C for N = n*m padded rows (Shamir, honest majority, DN07 degree
-    reduction: ~2 field elements sent per party per multiplication incl. preprocessing)."""
+    reduction: ~2 field elements sent per party per multiplication incl. preprocessing).
+    Propagation: ceil(steps / D) repeats of D steps + 1 check (a check costs a step); the first
+    step uses the public row numbers (prefix-OR + selection, ~2N^2)."""
     N = n * m
-    pairs = N * (N - 1) // 2
+    pairs = N * (N - 1) // 2 - n * m * (m - 1) // 2               # rows of one client: not compared
     cmp_kw, cmp_small, eq = 2 * (2 * FIX + 18), 8, 2 * 32       # bit-decomposition comparisons
     per_pair = 2 + cmp_kw + cmp_small + eq + 6                    # 2 dot products (1 reshare each)
-    iters = max(D, steps) + 1
+    repeats = max(1, -(-steps // D))
+    iters = repeats * (D + 1)                                     # steps + checks
     lr = max(1, int(np.ceil(np.log2(N + 1))))
     per_iter = 4 * N * N + N * (N - 1) * 2 * (lr + 1)            # selects (root + 3-word kappa), mins
-    mults = pairs * per_pair + iters * per_iter
+    mults = pairs * per_pair + 2 * N * N + (iters - 1) * per_iter
     inputs = m * (dim + n_img + 3) * (n - 1)                     # shares sent per client
-    return dict(rows=N, pairs=pairs, mults=int(mults), propagation_steps=int(iters),
+    return dict(rows=N, pairs=pairs, mults=int(mults), propagation_steps=int(iters), repeats=int(repeats),
                 rounds=int(12 + iters * (lr + 2 * lr)),
                 bytes_per_client=int((inputs + 2 * mults) * field_bytes))
 
 
 def circuit_union_with_keys(client_labels, client_keywords, client_sets=None, fuzzy=False, tau=TAU, t=2,
-                            D=8, m=None, workers=1, bucket_bits=BUCKET_BITS, session=b'label-union-circuit',
+                            D=1, m=None, workers=1, bucket_bits=BUCKET_BITS, session=b'label-union-circuit',
                             secure=True):
     """client_labels: per client [labels]; client_keywords: per client {label: keyword} (exact: the name);
     client_sets: per client {label: k nearest image anchors} or None (no image check).
@@ -151,7 +162,7 @@ def circuit_union_with_keys(client_labels, client_keywords, client_sets=None, fu
         for x in labels:
             owner.append((c, x))
             rows.append((kws[c][x], imgs[c][x] if imgs else None))
-    root, steps = group(rows, tau, t)                                             # C (ideal functionality)
+    root, steps = group(rows, tau, t, [c for c, _ in owner])                      # C (ideal functionality)
     kappa = {r: secrets.token_bytes(16) for r in set(root)}
     K = [dict() for _ in client_labels]
     for (c, x), r in zip(owner, root):
