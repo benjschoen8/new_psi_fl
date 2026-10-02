@@ -16,13 +16,20 @@ def pairwise_seed(shared_secret: bytes, id_a, id_b, session: bytes) -> bytes:
     return HKDF(hashes.SHA256(), SEED_BYTES, salt=session, info=info).derive(shared_secret)
 
 
+def word_dtype(modulus_bits: int):
+    """Smallest unsigned dtype holding Z_{2^modulus_bits}; its wrap-around is arithmetic mod 2^width."""
+    return np.uint16 if modulus_bits <= 16 else np.uint32 if modulus_bits <= 32 else np.uint64
+
+
 def prg(seed: bytes, length: int, modulus_bits: int = 32) -> np.ndarray:
-    """Expand a seed into `length` uniform elements of Z_{2^modulus_bits} (uint64 array)."""
+    """Expand a seed into `length` uniform elements of Z_{2^modulus_bits}, in word_dtype(modulus_bits):
+    2 / 4 / 8 ChaCha20 keystream bytes per element (16-bit sums need 4x less keystream than 64-bit)."""
     if len(seed) != SEED_BYTES or length < 0 or not 1 <= modulus_bits <= 64:
         raise ValueError('seed must be 32 bytes, length >= 0, 1 <= modulus_bits <= 64')
+    dt = np.dtype(word_dtype(modulus_bits))
     enc = Cipher(algorithms.ChaCha20(seed, b'\0' * 16), mode=None).encryptor()
-    words = np.frombuffer(enc.update(b'\0' * (8 * length)), dtype='<u8').copy()
-    return words & np.uint64((1 << modulus_bits) - 1) if modulus_bits < 64 else words
+    words = np.frombuffer(enc.update(bytes(dt.itemsize * length)), dtype=dt.newbyteorder('<')).astype(dt)
+    return words & dt.type((1 << modulus_bits) - 1) if modulus_bits < 8 * dt.itemsize else words
 
 
 # ------------------------------------------------------------------ Shamir over GF(2^521 - 1)

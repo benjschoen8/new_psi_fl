@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .secagg_primitives import pairwise_seed, prg, shamir_share, shamir_reconstruct
+from .secagg_primitives import pairwise_seed, prg, shamir_share, shamir_reconstruct, word_dtype
 
 RAW = dict(encoding=serialization.Encoding.Raw, format=serialization.PrivateFormat.Raw,
            encryption_algorithm=serialization.NoEncryption())
@@ -25,15 +25,21 @@ def _pub(sk):
     return sk.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
 
 
+def _reduce(v, bits):
+    """v (word_dtype(bits), wrapped mod 2^width) -> mod 2^bits, in place."""
+    if bits < 8 * v.itemsize:
+        np.bitwise_and(v, v.dtype.type((1 << bits) - 1), out=v)
+    return v
+
+
 def _pair_masks(s_sk, my_id, peer_pks, session, length, bits, ids_order):
-    """sum_{v>u} PRG(s_uv) - sum_{v<u} PRG(s_uv) mod 2^bits, over the given peers."""
-    mod = np.uint64((1 << bits) - 1) if bits < 64 else None
-    total = np.zeros(length, np.uint64)
+    """sum_{v>u} PRG(s_uv) - sum_{v<u} PRG(s_uv) mod 2^bits, over the given peers (in place, in
+    word_dtype(bits): no temporaries, 2-byte words for 16-bit sums)."""
+    total = np.zeros(length, word_dtype(bits))
     for v, pk in peer_pks.items():
         seed = pairwise_seed(s_sk.exchange(X25519PublicKey.from_public_bytes(pk)), my_id, v, session + b'/mask')
-        m = prg(seed, length, bits)
-        total = total + m if ids_order[my_id] < ids_order[v] else total - m
-    return total & mod if mod is not None else total
+        (np.add if ids_order[my_id] < ids_order[v] else np.subtract)(total, prg(seed, length, bits), out=total)
+    return _reduce(total, bits)
 
 
 class SecAggClient:
@@ -87,9 +93,10 @@ class SecAggClient:
         if len(self.U2) < self.t:
             raise ValueError('fewer than t clients shared keys')
         peers = {v: self.U1[v][1] for v in self.U2 if v != self.id}
-        y = x + prg(self._b, self.length, self.bits) + \
-            _pair_masks(self._s_sk, self.id, peers, self.session, self.length, self.bits, self.order)
-        return y & np.uint64((1 << self.bits) - 1) if self.bits < 64 else y
+        y = x.astype(word_dtype(self.bits))                       # x < 2^bits: exact
+        np.add(y, prg(self._b, self.length, self.bits), out=y)
+        np.add(y, _pair_masks(self._s_sk, self.id, peers, self.session, self.length, self.bits, self.order), out=y)
+        return _reduce(y, self.bits)
 
     # round 3
     def unmask(self, survivors):
@@ -139,25 +146,26 @@ class SecAggServer:
         if len(masked) < self.t:
             raise ValueError('abort: fewer than t masked inputs')
         self.U3 = set(masked)
-        self._masked = {u: np.asarray(y, np.uint64) for u, y in masked.items()}
+        self._masked = {u: np.asarray(y).astype(word_dtype(self.bits), copy=False) for u, y in masked.items()}
         return sorted(self.U3, key=self.order.get)
 
     def aggregate(self, reveals):
         """reveals: {v: client.unmask output} from at least t clients of U3."""
         if len(reveals) < self.t:
             raise ValueError('abort: fewer than t unmasking responses')
-        mask = np.uint64((1 << self.bits) - 1) if self.bits < 64 else None
-        total = sum(self._masked.values(), np.zeros(self.length, np.uint64))
+        total = np.zeros(self.length, word_dtype(self.bits))
+        for y in self._masked.values():
+            np.add(total, y, out=total)
         for u in self.U3:
             b = shamir_reconstruct([r['b'][u] for r in reveals.values()][: self.t])
-            total = total - prg(b, self.length, self.bits)
+            np.subtract(total, prg(b, self.length, self.bits), out=total)
         for u in self.U2 - self.U3:                   # dropped after sharing: cancel their pair masks
             s_sk = X25519PrivateKey.from_private_bytes(
                 shamir_reconstruct([r['s'][u] for r in reveals.values()][: self.t]))
             peers = {v: self.U1[v][1] for v in self.U3}
             # survivors added +/- PRG(s_uv) with u; recompute u's view and add it back
-            total = total + _pair_masks(s_sk, u, peers, self.session, self.length, self.bits, self.order)
-        return total & mask if mask is not None else total
+            np.add(total, _pair_masks(s_sk, u, peers, self.session, self.length, self.bits, self.order), out=total)
+        return _reduce(total, self.bits).astype(np.uint64)                # callers get uint64, as before
 
 
 def run_secagg(inputs, threshold, modulus_bits=32, session=b'', drop_before_masking=(), drop_before_unmask=(),
