@@ -564,7 +564,9 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         def key_of(k_, c):
             gan = local[c.id]['gan']
             return hashlib.sha256(json.dumps(dict(
-                data=client_hash(k_, c), labels=len(names[k_]), config=manifest['config'], trunk=trunk_id,
+                data=client_hash(k_, c), labels=len(names[k_]), trunk=trunk_id,
+                config=_digest({k: v for k, v in config.items()                # global_*: server classifier
+                                if k not in SPEED_ONLY and not k.startswith('global_')}),   # only, not warm-up
                 model=str(gan.G) + str(gan.D), seeds=[seed * 100003 + k_, seed * 100003 + k_ + 1],
                 version=GENERATOR_CACHE_VERSION,
                 **({'guide': dict(arch=str(gan.guide), epochs=guide_epochs, weight=guide_weight)}
