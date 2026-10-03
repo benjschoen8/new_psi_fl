@@ -311,7 +311,7 @@ def data_hash(loader):
 
 SPEED_ONLY = ('cuda_graph', 'fused_adam')     # config keys that only change speed: not part of the run's
                                               # identity (resume, generator cache keys stay valid)
-GENERATOR_CACHE_VERSION = 1          # bump when ClientCBNGAN.train changes: old cache entries stop matching
+GENERATOR_CACHE_VERSION = 2          # bump when ClientCBNGAN.train changes: old cache entries stop matching (2: class-balanced batches)
 
 
 def _finite_state(state):

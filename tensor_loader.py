@@ -89,6 +89,20 @@ class TensorLoader:
         order = _order(n, self.sampler.generator) if self.sampler else torch.arange(n)
         return self._batches(order, self.batch_size)
 
+    def balanced(self, m):
+        """Class-balanced epoch for per-label generators: every batch holds m images of EVERY label
+        (drawn with replacement within the label), ceil(n / (m * labels)) batches, so an epoch still
+        covers about n images. Uses (and advances) the loader's shuffle generator."""
+        d, g = self.dataset, self.sampler.generator if self.sampler else None
+        order = torch.argsort(d.y, stable=True)
+        cnt = torch.bincount(d.y)
+        labs = torch.nonzero(cnt).flatten()
+        start = (torch.cumsum(cnt, 0) - cnt)[labs, None]
+        y = labs.repeat_interleave(m)
+        for _ in range(math.ceil(len(d) / (m * len(labs)))):
+            pos = start + (torch.rand(len(labs), m, generator=g) * cnt[labs, None]).long()
+            yield _decode(d.x[order[pos.flatten()]]), y
+
     def ordered(self, bs=1024):
         """Dataset order (data_hash)."""
         _base_seed(None)

@@ -295,11 +295,17 @@ class ClientCBNGAN:
         counts = {}
         self.G.train(); self.D.train()
         full = getattr(loader, 'batch_size', None)
+        m = self.config.get('gen_label_batch', 32)
+        balanced = isinstance(self.G, PerLabelGenerator) and m > 0 and hasattr(loader, 'balanced')
+        if balanced:                       # every label's own generator gets m images per step (batch-stat
+            ys = loader.dataset.y          # BatchNorm per label); counts = the real label counts
+            counts = {int(a): int(c) for a, c in enumerate(torch.bincount(ys).tolist()) if c}
+            full = m * len(counts)
         for epoch in range(self.epochs):
-            for x, y in loader:
+            for x, y in (loader.balanced(m) if balanced else loader):
                 if len(x) < 2:
                     continue
-                if epoch == 0:                                   # counted on the CPU copy: no GPU sync
+                if epoch == 0 and not balanced:                  # counted on the CPU copy: no GPU sync
                     for a, c in zip(*np.unique((y.cpu() if y.is_cuda else y).numpy(), return_counts=True)):
                         counts[int(a)] = counts.get(int(a), 0) + int(c)
                 if self.graphs and len(x) == full:

@@ -32,5 +32,35 @@ class TensorLoaderTests(unittest.TestCase):
             torch.testing.assert_close(g1, g2, rtol=0, atol=0)                  # global RNG untouched
 
 
+class BalancedBatchTests(unittest.TestCase):
+    def test_every_batch_has_m_images_of_every_label_and_is_reproducible(self):
+        y = torch.tensor([0] * 90 + [1] * 8 + [2] * 2)                      # very unbalanced
+        L = TensorLoader.from_tensors(torch.arange(100, dtype=torch.uint8).view(100, 1, 1, 1).expand(-1, 1, 2, 2),
+                                      y, 64, shuffle=True)
+        runs = []
+        for _ in range(2):
+            L.sampler.generator = torch.Generator().manual_seed(3)
+            runs.append(list(L.balanced(4)))
+        self.assertEqual(len(runs[0]), 9)                                    # ceil(100 / (4 * 3))
+        for (x, yb), (x2, _) in zip(*runs):
+            self.assertEqual(torch.bincount(yb).tolist(), [4, 4, 4])
+            self.assertTrue(torch.equal(x, x2))
+            ids = torch.round((x[:, 0, 0, 0] * .5 + .5) * 255).long()      # image value = its index
+            self.assertTrue(torch.equal(y[ids], yb))                         # each image has its label
+
+    def test_per_label_generator_trains_on_balanced_batches(self):
+        from nets import DCGANDiscriminator
+        from secfl.cbn_gan import ClientCBNGAN, DCGANTemplate, PerLabelGenerator
+        y = torch.tensor([0] * 50 + [1] * 6 + [2] * 4)
+        L = TensorLoader.from_tensors(torch.zeros(60, 1, 32, 32, dtype=torch.uint8), y, 64, shuffle=True)
+        seen = []
+        orig = L.balanced
+        L.balanced = lambda m: (seen.append(torch.bincount(b[1]).tolist()) or b for b in orig(m))
+        g = ClientCBNGAN(PerLabelGenerator(3, DCGANTemplate(8, 3, (8, 4, 2))), DCGANDiscriminator(3),
+                         dict(gen_noise_dim=8, gen_label_batch=8), 'cpu', seed=0)
+        self.assertEqual(g.train(L), {0: 50, 1: 6, 2: 4})                    # real counts (aggregation)
+        self.assertEqual(seen, [[8, 8, 8]] * 3)                              # ceil(60 / 24) steps
+
+
 if __name__ == '__main__':
     unittest.main()

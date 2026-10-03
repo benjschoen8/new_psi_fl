@@ -1,7 +1,9 @@
-"""Plain-GeFL (--agg plain: no SecAgg, no PSI cryptography) hyper-parameter grid search for max accuracy.
+"""Hyper-parameter grid search for max accuracy: Plain-GeFL (--scheme plain, default: no SecAgg, no PSI
+cryptography), Ours (--scheme ours: circuit PSI + SecAgg) or Ours fuzzy (--scheme ours_fuzzy).
 
     python plain_sweep.py                                   # default grid, 3-dataset clients, 15 rounds
     python plain_sweep.py --jobs 3 --rounds 20 --grid '{"--gen-widths": ["128,64,32"], "gen_lr": [2e-4, 5e-4]}'
+    python plain_sweep.py --scheme ours --out runs/sweep_ours   # same grid, our scheme
     python plain_sweep.py --summary runs/sweep              # just print the table of a (running) sweep
 
 Grid keys starting with '--' are CLI flags of secure_code_no_cluster ("" value = bare flag, null = absent);
@@ -25,6 +27,7 @@ GRID = {                                     # 3 x 2 x 2 x 2 = 24 runs
     'global_samples_per_class': [64, 512],
     'global_model_epochs': [5, 20],
 }
+SCHEMES = {'plain': ['--agg', 'plain'], 'ours': [], 'ours_fuzzy': ['--union', 'fuzzy']}   # as run_experiments.sh
 DATA = '--num-train-mnist 1 --num-train-emnist 1 --num-train-cifar10 1 --min-holders 1'
 
 
@@ -62,6 +65,7 @@ def summary(out):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--out', type=Path, default=Path('runs/sweep'))
+    p.add_argument('--scheme', choices=tuple(SCHEMES), default='plain')
     p.add_argument('--grid', help='JSON dict replacing the default grid')
     p.add_argument('--rounds', type=int, default=15)
     p.add_argument('--jobs', type=int, default=3, help='runs at once')
@@ -98,7 +102,7 @@ def main():
         OmegaConf.save(conf, yml)
         d.mkdir(exist_ok=True)
         resume = ['--resume', str(d / 'checkpoint_last.pt')] if (d / 'checkpoint_last.pt').exists() else []
-        cmd = [sys.executable, '-m', 'secure_code_no_cluster', *a.data.split(), '--agg', 'plain',
+        cmd = [sys.executable, '-m', 'secure_code_no_cluster', *a.data.split(), *SCHEMES[a.scheme],
                '--exp-conf', str(yml), *cli, *a.extra.split(), '--rounds', str(a.rounds), '--device', a.device,
                '--workers', str(a.workers), '--no-progress', '--output', str(d), *resume]
         env = dict(os.environ, **({'CUDA_VISIBLE_DEVICES': gpus[i % len(gpus)]} if gpus else {}))
