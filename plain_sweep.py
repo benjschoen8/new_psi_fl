@@ -66,7 +66,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--out', type=Path, default=Path('runs/sweep'))
     p.add_argument('--scheme', choices=tuple(SCHEMES), default='plain')
-    p.add_argument('--grid', help='JSON dict replacing the default grid')
+    p.add_argument('--grid', help='JSON dict replacing the default grid, or a JSON list of explicit runs (dicts)')
     p.add_argument('--rounds', type=int, default=15)
     p.add_argument('--jobs', type=int, default=3, help='runs at once')
     p.add_argument('--workers', type=int, default=1, help='client threads per run')
@@ -80,7 +80,7 @@ def main():
     if a.summary:
         return summary(a.summary)
     grid = json.loads(a.grid) if a.grid else GRID
-    combos = [dict(zip(grid, v)) for v in itertools.product(*grid.values())]
+    combos = grid if isinstance(grid, list) else [dict(zip(grid, v)) for v in itertools.product(*grid.values())]
     gpus = a.gpus.split()
     (a.out / 'confs').mkdir(parents=True, exist_ok=True)
     print(f'{len(combos)} runs, {a.jobs} at a time -> {a.out}', flush=True)
