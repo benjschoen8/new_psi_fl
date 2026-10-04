@@ -48,8 +48,9 @@ class GlobalClassifierTrainer:
                     with torch.no_grad():
                         xs.append(generator(z, y).cpu())
                     ys.append(torch.full((samples,), global_id, dtype=torch.long))
-            return DataLoader(TensorDataset(torch.cat(xs), torch.cat(ys)),
-                              batch_size=config.get('batch_size', 64), shuffle=True)
+            n = sum(len(y) for y in ys)                                # a last batch of 1 breaks BatchNorm
+            return DataLoader(TensorDataset(torch.cat(xs), torch.cat(ys)), batch_size=config.get('batch_size', 64),
+                              shuffle=True, drop_last=n % config.get('batch_size', 64) == 1)
 
         loader = synthetic()
         self.model.train()

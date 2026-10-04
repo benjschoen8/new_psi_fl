@@ -93,18 +93,23 @@ def _digest(obj):
 
 # ---------------------------------------------------------------------------- upload encoding
 def row_spec(g):
-    """(name, shape, dtype) of every block of a row, in rows() order (for per-tensor scales)."""
+    """(name, shape, dtype) of every block of a row, in rows() order (for per-tensor scales). A per-label
+    generator's row is its whole generator: one block per parameter tensor of the template (emb.weight
+    holds them in template order), not one block (one scale) for the whole generator."""
+    from secfl.cbn_gan import PerLabelGenerator
+    if isinstance(g, PerLabelGenerator):
+        return [(n, (int(np.prod(sh)),), np.float32) for n, sh in g._shapes]
     sd = g.state_dict()
     return [(k, (sd[k].shape[1],), np.float32) for k in sorted(sd) if _is_row(k)]
 
 
-def encode_update(grads, U, it, ir, sc_t, sc_r, rng, fixed=False, blocks=None):
+def encode_update(grads, U, it, ir, sc_t, sc_r, rng, fixed=False, blocks=None, res=compress.LEVELS):
     """grads {'T': trunk update, k: row-k update} (missing = zeros) -> uint64 vector:
     [trunk[it] | row 0[ir] | ... | row U-1[ir] | counts (trunk, rows) | clip fractions].
     fixed=False: clipped 8-bit stochastic rounding, mod 2^16. fixed=True: 2^-24 fixed point, mod 2^64.
     blocks (tb, rb, nt, nr): tensor-block id of every uploaded trunk / row coordinate; then the client
-    also reports, per block, the fraction of its values that exceeded the scale (0..127, adaptive
-    clipping feedback: the Aggregator sees only the sum over clients)."""
+    also reports, per block, the fraction of its values that exceeded the scale (in steps of 1/res, adaptive
+    clipping feedback: the Aggregator sees only the sum over clients; res * clients < 2^15)."""
     kt, kr = it.size, ir.size
     extra = 0 if blocks is None or fixed else blocks[2] + blocks[3]
     base = kt + U * kr + U + 1
@@ -121,8 +126,7 @@ def encode_update(grads, U, it, ir, sc_t, sc_r, rng, fixed=False, blocks=None):
             if extra:
                 over = np.abs(g[it]) > sc_t[it]
                 tot = np.bincount(tb, minlength=nt)
-                v[base:base + nt] = np.round(np.bincount(tb[over], minlength=nt) / np.maximum(tot, 1)
-                                             * compress.LEVELS)
+                v[base:base + nt] = np.round(np.bincount(tb[over], minlength=nt) / np.maximum(tot, 1) * res)
         else:
             v[kt + k * kr:kt + (k + 1) * kr] = q(g[ir], sc_r[k][ir])
             v[kt + U * kr + 1 + k] = 1
@@ -130,11 +134,11 @@ def encode_update(grads, U, it, ir, sc_t, sc_r, rng, fixed=False, blocks=None):
                 rc += np.bincount(rb[np.abs(g[ir]) > sc_r[k][ir]], minlength=nr)
                 rn += np.bincount(rb, minlength=nr)
     if extra:
-        v[base + nt:] = np.round(rc / np.maximum(rn, 1) * compress.LEVELS)
+        v[base + nt:] = np.round(rc / np.maximum(rn, 1) * res)
     return v.view(np.uint64).copy() if fixed else (v % (1 << compress.BITS)).astype(np.uint64)
 
 
-def decode_update(total, U, it, ir, sc_t, sc_r, fixed=False, blocks=None):
+def decode_update(total, U, it, ir, sc_t, sc_r, fixed=False, blocks=None, res=compress.LEVELS):
     """SecAgg sum -> (mean trunk update on it or None, {k: mean row-k update on ir}, counts[U+1]);
     with blocks also (mean clip fraction per trunk block, per row block) over the clients that trained."""
     kt, kr = it.size, ir.size
@@ -153,7 +157,7 @@ def decode_update(total, U, it, ir, sc_t, sc_r, fixed=False, blocks=None):
     r = {k: r_part[k] / n[k + 1] for k in range(U) if n[k + 1]}
     if blocks is None or fixed:
         return t, r, n
-    frac = clip / compress.LEVELS / max(n[0], 1)
+    frac = clip / res / max(n[0], 1)
     return t, r, n, (frac[:blocks[2]], frac[blocks[2]:])
 
 
@@ -706,6 +710,8 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
     if ck:
         trunk, table, history, start = ck['trunk'], ck['table'], ck['history'], ck['round']
         sc_t, sc_r, mult_t, mult_r = ck['scales']
+        if mult_r.size != len(rspec):                                     # checkpoint from one block per row
+            mult_r = np.bincount(br, sc_r.max(0)) / np.bincount(br)
         qrng.bit_generator.state = cs['qrng']
         if on_resume:
             on_resume(start)
@@ -855,25 +861,29 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         row['seconds']['local_training'] = time.perf_counter() - t
 
         t = time.perf_counter()                                           # 5. aggregation
-        it = compress.keep_index(trunk.size, keep_frac if quant else 1., r, b'cbn-trunk')
-        ir = compress.keep_index(P, keep_frac if quant else 1., r, b'cbn-rows')
-        if not quant:                                                     # uncompressed Plain-GeFL
+        qr = quantize and not (r == 0 and (warmed_now or bool(ck and ck.get('warmed'))))   # first upload after
+        # the local warm-up carries the whole warm-up (far beyond round-sized scales: 8-bit clipping lost up to
+        # half of it): sent uncompressed once (plain: floats; secagg: 64-bit fixed point)
+        res = max(compress.LEVELS, (1 << 15) // (n_cl + 1))               # clip-rate resolution, no wrap
+        it = compress.keep_index(trunk.size, keep_frac if qr else 1., r, b'cbn-trunk')
+        ir = compress.keep_index(P, keep_frac if qr else 1., r, b'cbn-rows')
+        if not qr and agg == 'plain':                                  # uncompressed Plain-GeFL
             mt, mr, n = plain_mean(results, U, it, ir)
             up = [4 * sum(g.size for g in u[0].values()) if u else 0 for _, u in results]
             row['bytes'].update(upload=int(sum(up)), upload_payload_per_client=float(np.mean(up)),
                                 upload_per_client=float(np.mean(up)))
         else:
-            if quant:                                                     # diagnostic: share of clipped values
+            if qr:                                                     # diagnostic: share of clipped values
                 over = [(np.abs(g[it]) > sc_t[it]) if k == 'T' else (np.abs(g[ir]) > sc_r[k][ir])
                         for _, u in results if u for k, g in u[0].items()]
                 row['clipped'] = float(np.concatenate(over).mean()) if over else 0.
-            blocks = (bt[it], br[ir], len(spec), len(rspec)) if quant else None
-            vectors = {cid: encode_update(u[0] if u else {}, U, it, ir, sc_t, sc_r, qrng, not quant, blocks)
+            blocks = (bt[it], br[ir], len(spec), len(rspec)) if qr else None
+            vectors = {cid: encode_update(u[0] if u else {}, U, it, ir, sc_t, sc_r, qrng, not qr, blocks, res)
                        for cid, u in results}                             # everyone uploads
             if agg == 'secagg':
                 sa = {}
                 total, _ = run_secagg(vectors, threshold=max(2, -(-2 * n_cl // 3)),
-                                      modulus_bits=compress.BITS if quant else 64,
+                                      modulus_bits=compress.BITS if qr else 64,
                                       session=f'cbn-round-{r}'.encode(), workers=workers, stats=sa)
             else:                                                         # compressed Plain-GeFL: same
                 total = np.sum(np.stack(list(vectors.values())).astype(np.int64), 0) % (1 << compress.BITS)
@@ -882,9 +892,9 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                 up = [(it.size if 'T' in u[0] else 0) + sum(ir.size + 2 for k in u[0] if k != 'T')
                       + len(spec) + len(rspec) if u else 0 for _, u in results]
                 sa = dict(payload_up=int(sum(up)), control_up=0, control_down=0)
-            out = decode_update(total, U, it, ir, sc_t, sc_r, not quant, blocks)
+            out = decode_update(total, U, it, ir, sc_t, sc_r, not qr, blocks, res)
             mt, mr, n = out[:3]
-            if quant:                                                     # adaptive clipping: each block's
+            if qr:                                                     # adaptive clipping: each block's
                 ct, cr = out[3]                                           # scale follows its clip rate
                 step = lambda c: np.where(c > .1, 4., np.where(c > .01, 2., np.where(c < .001, .9, 1.)))
                 mult_t, mult_r = mult_t * step(ct), mult_r * step(cr)

@@ -19,14 +19,30 @@ import torch
 import torch.nn.functional as F
 
 
+class _OwnRandomness:
+    """Diagnostics must not change the run: save and restore the global CPU / CUDA random states."""
+    def __enter__(self):
+        self.cpu = torch.get_rng_state()
+        self.cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+
+    def __exit__(self, *exc):
+        torch.set_rng_state(self.cpu)
+        if self.cuda is not None:
+            torch.cuda.set_rng_state_all(self.cuda)
+
+
 def _logits(model, x):
     out = model(x)
     return out[1] if isinstance(out, tuple) else out
 
 
 class Diagnostics:
-    def __init__(self, train_loaders, ids, truth, predicted, target_names, classifier_factory, config, device,
-                 out_dir, view=None):
+    def __init__(self, *args, **kw):
+        with _OwnRandomness():
+            self._init(*args, **kw)
+
+    def _init(self, train_loaders, ids, truth, predicted, target_names, classifier_factory, config, device,
+              out_dir, view=None):
         from evaluation import semantic_alignment
         self.truth, self.names, self.device, self.out = truth, target_names, device, Path(out_dir)
         self.align = semantic_alignment(predicted, truth)                # generator row -> true class
@@ -42,7 +58,9 @@ class Diagnostics:
             xs, ts = [], []                        # (client after client, the last clients' classes win)
             for cid, loader in zip(ids, train_loaders):
                 t = torch.tensor([truth[cid][i] for i in range(len(truth[cid]))])
-                for x, y in loader:                # stored as uint8: the images are 8-bit anyway
+                batches = (loader.ordered() if hasattr(loader, 'ordered') else   # dataset order: not the
+                           torch.utils.data.DataLoader(loader.dataset, batch_size=256))  # client's shuffle RNG
+                for x, y in batches:               # stored as uint8: the images are 8-bit anyway
                     xs.append(torch.round((x * .5 + .5) * 255).clamp_(0, 255).to(torch.uint8))
                     ts.append(t[y])
             X, T = torch.cat(xs), torch.cat(ts)
@@ -77,7 +95,11 @@ class Diagnostics:
                             conf[(key, pred)] += 1
         return hit, n, conf
 
-    def __call__(self, rnd, model, generator, U, tests):
+    def __call__(self, *args):
+        with _OwnRandomness():
+            return self._round(*args)
+
+    def _round(self, rnd, model, generator, U, tests):
         model.eval()
         if self.ceiling is None:                                         # reference on real test data
             hit, n, _ = self._test(self.ref, tests, lambda p: self.names[p])

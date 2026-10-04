@@ -20,6 +20,8 @@ def label_names(dataset, dataset_name):
         return tuple(names)
     if hasattr(dataset, 'dataset'):
         return label_names(dataset.dataset, dataset_name)
+    if hasattr(dataset, 'remap'):                                     # ClassSubsetDataset: its own classes, in
+        return tuple(str(name) for name in dataset.classes)           # its renumbered local order
     if dataset_name in ('MNIST', 'USPS', 'SVHN'):
         return tuple(str(i) for i in range(10))
     if not hasattr(dataset, 'classes'):

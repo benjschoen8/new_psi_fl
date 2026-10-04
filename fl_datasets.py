@@ -357,7 +357,7 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
             own, train_idcs, test_idcs = partition_class_subsets(train_labels, test_labels, n_clients, lo, hi,
                                                                  sub_seed, full=full)
         if subsets:
-            names = list(train_dataset.classes)
+            names = list(class_names)                                  # readable names ('3', not '3 - three')
             client_loaders = []
             for i in range(n_clients):
                 print(f"{i:<6} | {len(train_idcs[i]):<6} | {len(test_idcs[i]):<6} | {len(own[i])} classes: "
