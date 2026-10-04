@@ -20,7 +20,7 @@ img_size: 32
 global_model_epochs: 5
 global_model_optim: Adam
 global_model_optim_lr: 0.001
-global_samples_per_class: 64
+global_samples_per_class: 1024   # generated images per label for the server classifier (was 64)
 entropy_ratio: 0.25
 use_new_entropy_method: true
 # PSI mappings: owner description languages (cycled over groups), rt_protocol method/backend

@@ -173,7 +173,14 @@ def get_transforms(name):
             transforms.Normalize((0.5,), (0.5,))
         ])
     
-    elif name in ['CIFAR10', 'CIFAR100']:
+    elif name == 'STL10':                                         # 96x96 photos -> 32x32 like CIFAR
+        return transforms.Compose([
+            transforms.Resize((32, 32)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+
+    elif name in ['CIFAR10', 'CIFAR100', 'SVHN']:
         return transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
@@ -206,12 +213,28 @@ def get_raw_dataset_transform(name, root, train=True):
 
     elif name == 'USPS':
         return datasets.USPS(root, train=train, download=True, transform=transform)
+
+    elif name == 'STL10':                                         # labelled split only (500 / 800 per class)
+        d = datasets.STL10(root, split='train' if train else 'test', download=True, transform=transform)
+        d.classes = stl10_classes()
+        return d
+
+    elif name == 'SVHN':                                          # digits 0-9 (torchvision maps label 10 -> 0)
+        d = datasets.SVHN(root, split='train' if train else 'test', download=True, transform=transform)
+        d.classes = [str(i) for i in range(10)]
+        return d
     
+def stl10_classes():
+    """STL-10's classes in its label order, named like CIFAR-10's (public dictionary: 'car' is
+    'automobile'); 9 of 10 are CIFAR-10 classes, 'monkey' is STL-only (CIFAR-10's 'frog' is CIFAR-only)."""
+    return ['airplane', 'bird', 'automobile', 'cat', 'deer', 'dog', 'horse', 'monkey', 'ship', 'truck']
+
+
 # ==========================================
 # Get Readable Class Names
 # ==========================================
 def get_readable_class_names(name, root='./data/raw'):
-    if name in ['MNIST', 'USPS']:
+    if name in ['MNIST', 'USPS', 'SVHN']:
         return [str(i) for i in range(10)]
 
     elif name == 'FashionMNIST':
@@ -223,6 +246,9 @@ def get_readable_class_names(name, root='./data/raw'):
         d = datasets.EMNIST(root, split='byclass', train=True, download=True)
         return d.classes
         
+    elif name == 'STL10':
+        return stl10_classes()
+
     elif name == 'CIFAR10':
         # CIFAR10 in-build classes: ['airplane', 'automobile', 'bird', ...]
         d = datasets.CIFAR10(root, train=True, download=True)
@@ -244,7 +270,9 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
         'EMNIST': (args.num_train_emnist + args.num_new_clients) if args.num_train_emnist > 0 else 0,
         'CIFAR10': (args.num_train_cifar10 + args.num_new_clients) if args.num_train_cifar10 > 0 else 0,
         'CIFAR100': (args.num_train_cifar100 + args.num_new_clients) if args.num_train_cifar100 > 0 else 0,
-        'USPS': (args.num_train_usps + args.num_new_clients) if args.num_train_usps > 0 else 0
+        'USPS': (args.num_train_usps + args.num_new_clients) if args.num_train_usps > 0 else 0,
+        'STL10': (getattr(args, 'num_train_stl10', 0) + args.num_new_clients) if getattr(args, 'num_train_stl10', 0) > 0 else 0,
+        'SVHN': (getattr(args, 'num_train_svhn', 0) + args.num_new_clients) if getattr(args, 'num_train_svhn', 0) > 0 else 0
     }
     batch_size = exp_conf.get('batch_size', 64)
     dirichlet_alpha = exp_conf.get('dirichlet_alpha', 0.1)
@@ -260,9 +288,11 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
     server_test_loaders = {}
     usps_label_mapping = None
 
-    for d_name, n_clients in dataset_configs.items():
+    n_loaded = 0                     # class-subset seed offset: the k-th loaded dataset draws its own
+    for d_name, n_clients in dataset_configs.items():   # subsets (the first keeps args.seed, as before)
         if n_clients == 0:
             continue
+        sub_seed, n_loaded = args.seed + 1000003 * n_loaded, n_loaded + 1
         
         # --- Readable Class Names (e.g. dog, cat ...) ---
         class_names = get_readable_class_names(d_name, root=DATA_ROOT)
@@ -321,11 +351,11 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
         subsets = getattr(args, 'class_subsets', None)
         full = getattr(args, 'class_share', 'split') == 'full'
         if subsets == 'even':                                          # own classes per client (no cache:
-            own, train_idcs, test_idcs = partition_even(train_labels, test_labels, n_clients, args.seed, full=full)
+            own, train_idcs, test_idcs = partition_even(train_labels, test_labels, n_clients, sub_seed, full=full)
         elif subsets:                                                  # deterministic from the seed)
             lo, hi = map(int, subsets.split(','))
             own, train_idcs, test_idcs = partition_class_subsets(train_labels, test_labels, n_clients, lo, hi,
-                                                                 args.seed, full=full)
+                                                                 sub_seed, full=full)
         if subsets:
             names = list(train_dataset.classes)
             client_loaders = []

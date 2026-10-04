@@ -20,7 +20,7 @@ def label_names(dataset, dataset_name):
         return tuple(names)
     if hasattr(dataset, 'dataset'):
         return label_names(dataset.dataset, dataset_name)
-    if dataset_name in ('MNIST', 'USPS'):
+    if dataset_name in ('MNIST', 'USPS', 'SVHN'):
         return tuple(str(i) for i in range(10))
     if not hasattr(dataset, 'classes'):
         raise ValueError(f'No explicit class metadata for {dataset_name}')
@@ -121,7 +121,7 @@ def parser():
     p.add_argument('--pretrained', type=Path, help='Warm-start clients from a revised_protocol checkpoint')
     p.add_argument('--smoke', action='store_true', help='Tiny synthetic CPU-capable experiment; no downloads')
     p.add_argument('--num-new-clients', '--num_new_clients', type=int, default=0)
-    for name in ('mnist', 'emnist', 'fashionmnist', 'cifar10', 'cifar100', 'usps'):
+    for name in ('mnist', 'emnist', 'fashionmnist', 'cifar10', 'cifar100', 'usps', 'svhn', 'stl10'):
         p.add_argument(f'--num-train-{name}', f'--num_train_{name}', type=int,
                        default=10 if name in ('mnist', 'emnist', 'cifar10') else 0)
     p.add_argument('--class-subsets', metavar='LO,HI|even',

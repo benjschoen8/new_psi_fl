@@ -418,7 +418,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         save_every=1, keep_all=False, resume=None, seed=0, progress=False, on_resume=None, domain_check=True,
         samples_per_label=16, union_result=None, quantize=True, keep_frac=0.1, quant_scale0=0.05,
         min_holders=2, warmup_epochs=0, union='exact', keywords=None, fuzzy=None, generator_cache=None,
-        cache_every=5, guide_factory=None, guide_epochs=5, guide_weight=.5, client_procs=None, image_match=(6, 2), label_psi='circuit', circuit_tau=None):
+        cache_every=5, guide_factory=None, guide_epochs=5, guide_weight=.5, client_procs=None, image_match=(6, 2), label_psi='circuit', circuit_tau=None, diagnostics=False):
     """gen_factory(num_rows) -> CBN generator; disc_factory(k) -> local D over k labels.
     agg: 'secagg' (the protocol) or 'plain' (Plain-GeFL, no cryptography).
     union_result: reuse a cbn_union() output (the OPRF indices are random per run).
@@ -787,6 +787,12 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
 
     bb = BulletinBoard()
     model = trainer.model
+    diag = None
+    if diagnostics and checkpoint_dir and rounds > start:                 # experimenter only (diagnostics.py)
+        from diagnostics import Diagnostics
+        diag = Diagnostics([c.train_loader for c in clients], ids, truth, predicted,
+                           sorted({x for l in names for x in l}), classifier_factory, config, device,
+                           Path(checkpoint_dir) / 'diag', {r['cls']: r for r in Un['view']})
     bar = tqdm(range(start, rounds), desc='rounds', unit='round', initial=start, total=rounds, disable=not progress)
     for r in bar:
         row = dict(round=r + 1, seconds={}, bytes=dict(download_per_client=0.))
@@ -911,6 +917,10 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         ev = evaluate_global(model, tests, predicted, truth, device)
         row['seconds']['evaluation'] = time.perf_counter() - t
         row.update(accuracy=ev['ground_truth_acc'], old_acc=ev['old_acc'], evaluation=ev)
+        if diag:
+            t = time.perf_counter()
+            row['diag'] = diag(r + 1, model, g, U, tests)
+            row['seconds']['diagnostics'] = time.perf_counter() - t
         bar.set_postfix(acc=f"{row['accuracy']:.4f}")
         history.append(row)
         if record:

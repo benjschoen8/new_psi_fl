@@ -436,6 +436,10 @@ def main():
     p.add_argument('--generator-cache', type=Path, default=Path('data/generator_cache'),
                    help='cbn warm-up: cached client generators (generator_<data hash>_epochs<e>_seed<s>.pt, saved '
                         'every 5 epochs), shared by every run of the same clients')
+    p.add_argument('--diagnostics', action='store_true',
+                   help='cbn: experimenter-only per-round diagnostics in metrics.jsonl (diag) and <out>/diag/: '
+                        'real-data ceiling, per-class accuracy and confusions, generator fidelity / diversity, '
+                        'sample grids (diagnostics.py)')
     p.add_argument('--heter', action='store_true',
                    help='cbn, heter version: every client trains its own heterogeneous classifier (nets.'
                         'get_heterogeneous_model: MLP, CNN, ResNet8/18, MobileNetV2/V3, LeNet, AlexNet, '
@@ -552,7 +556,7 @@ def main():
                    + (f"union exact={um['exact']} " if um else '')
                    + f"upload/client={per / 1e3:.1f}kB ({sum(row['seconds'].values()):.1f}s)")
     devices = [resolve_device(d) for d in args.devices.split(',')] if args.devices else [args.device]
-    common = dict(agg=args.agg, rounds=args.rounds or config.get('global_rounds', 45),
+    common = dict(agg=args.agg, rounds=args.rounds if args.rounds is not None else config.get('global_rounds', 45),
                   device=devices[0], devices=devices, workers=args.workers, record=record,
                   checkpoint_dir=out if args.save_every else None, save_every=max(1, args.save_every),
                   keep_all=args.keep_all, resume=args.resume, seed=args.seed, progress=not args.no_progress,
@@ -574,7 +578,8 @@ def main():
                                 client_procs={'auto': None, 'on': True, 'off': False}[args.client_procs],
                                 image_match=None if args.image_match == 'off' else
                                 tuple(int(v) for v in args.image_match.split(',')),
-                                label_psi=args.label_psi, circuit_tau=args.circuit_tau, **common)
+                                label_psi=args.label_psi, circuit_tau=args.circuit_tau,
+                                diagnostics=args.diagnostics, **common)
     else:
         result = run(clients, spaces, tests, gen_f, disc_f, cls_f, config, dictionary, code_dim=code_dim,
                      union=args.union, **common)
