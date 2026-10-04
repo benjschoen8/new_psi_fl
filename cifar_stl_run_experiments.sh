@@ -11,7 +11,7 @@
 #       images for the server classifier, training.augment; gan_diffaug / gan_spectral_norm: DiffAugment and
 #       spectral normalisation in the clients' GAN training, secfl/cbn_gan.py; global_resample: fresh synthetic
 #       images every classifier epoch); gen_label_batch 32, widths 64,32,16 (best so far); --heter is the default
-#       (local classifiers guide the generators): the list compares no guide, guide epochs and weights; JOBS, WORKERS, ROUNDS, OUT, GRID, SWEEP_ARGS override;
+#       (local classifiers guide the generators): the list compares guide epochs and weights; JOBS, WORKERS, ROUNDS, OUT, GRID, SWEEP_ARGS override;
 #       GPUS="0 1" JOBS=2: one run per GPU at a time.
 #       Results: python plain_sweep.py --summary runs/cifar_stl_guide;  per run: --report <run folder>
 cd "$(dirname "$0")"
@@ -20,7 +20,6 @@ SHARE=${SHARE:-split}
 export DATA="--num-train-cifar10 3 --num-train-stl10 3 --num-train-mnist 0 --num-train-emnist 0 --class-subsets $CLASSES --class-share $SHARE --min-holders 1"
 if [[ ${SWEEP:-0} == 1 ]]; then
     GRID=${GRID:-'[
- {"--warmup-epochs":60, "global_augment":true, "gan_diffaug":true, "gan_spectral_norm":true, "global_resample":true, "--no-heter":""},
  {"--warmup-epochs":60, "global_augment":true, "gan_diffaug":true, "gan_spectral_norm":true, "global_resample":true, "--guide-epochs":5,  "--guide-weight":0.5},
  {"--warmup-epochs":60, "global_augment":true, "gan_diffaug":true, "gan_spectral_norm":true, "global_resample":true, "--guide-epochs":20, "--guide-weight":0.5},
  {"--warmup-epochs":60, "global_augment":true, "gan_diffaug":true, "gan_spectral_norm":true, "global_resample":true, "--guide-epochs":20, "--guide-weight":1.0},
