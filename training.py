@@ -3,6 +3,20 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 
+def augment(x, shift=0.25, flip=True, noise=0.05):
+    """Per-image random shift (up to shift/2 of the side, reflected border), horizontal flip and pixel
+    noise, on the GPU in one grid_sample: breaks per-generator fingerprints of the synthetic images
+    (config global_augment; flips suit photos, not digits or letters: global_augment_flip)."""
+    n = len(x)
+    sx = torch.where(torch.rand(n, device=x.device) < .5, -1., 1.) if flip else torch.ones(n, device=x.device)
+    theta = torch.zeros(n, 2, 3, device=x.device)
+    theta[:, 0, 0], theta[:, 1, 1] = sx, 1.
+    theta[:, :, 2] = (torch.rand(n, 2, device=x.device) * 2 - 1) * shift
+    grid = torch.nn.functional.affine_grid(theta, x.shape, align_corners=False)
+    x = torch.nn.functional.grid_sample(x, grid, padding_mode='reflection', align_corners=False)
+    return (x + noise * torch.randn_like(x)).clamp_(-1, 1)
+
+
 class GlobalClassifierTrainer:
     def __init__(self, model_factory, config=None, device='cpu'):
         self.factory, self.config, self.device = model_factory, config or {}, device
@@ -37,10 +51,14 @@ class GlobalClassifierTrainer:
                             batch_size=config.get('batch_size', 64), shuffle=True)
         self.model.train()
         criterion = torch.nn.CrossEntropyLoss()
+        aug = config.get('global_augment', False)
         for _ in range(epochs):
             for images, labels in loader:
                 self.optimizer.zero_grad()
-                output = self.model(images.to(self.device))
+                images = images.to(self.device)
+                if aug:
+                    images = augment(images, flip=config.get('global_augment_flip', True))
+                output = self.model(images)
                 logits = output[1] if isinstance(output, tuple) else output
                 loss = criterion(logits, labels.to(self.device))
                 loss.backward()

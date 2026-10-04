@@ -35,19 +35,28 @@ class Diagnostics:
         self.n = int(config.get('diag_samples', 200))
         self.out.mkdir(parents=True, exist_ok=True)
         self.ref = classifier_factory(len(target_names)).to(device)
-        f = self.out / 'reference.pt'
+        f = self.out / 'reference_pooled.pt'       # (reference.pt: older runs, trained client by client)
         if f.exists():
             self.ref.load_state_dict(torch.load(f, map_location=device))
-        else:                                                            # centralised, real data
+        else:                                      # centralised: all clients' real images POOLED and shuffled
+            xs, ts = [], []                        # (client after client, the last clients' classes win)
+            for cid, loader in zip(ids, train_loaders):
+                t = torch.tensor([truth[cid][i] for i in range(len(truth[cid]))])
+                for x, y in loader:                # stored as uint8: the images are 8-bit anyway
+                    xs.append(torch.round((x * .5 + .5) * 255).clamp_(0, 255).to(torch.uint8))
+                    ts.append(t[y])
+            X, T = torch.cat(xs), torch.cat(ts)
             opt = torch.optim.Adam(self.ref.parameters(), lr=config.get('global_model_optim_lr', 1e-3))
+            bs, gen = int(config.get('batch_size', 64)), torch.Generator().manual_seed(0)
             self.ref.train()
             for _ in range(int(config.get('diag_ref_epochs', 10))):
-                for cid, loader in zip(ids, train_loaders):
-                    t = torch.tensor([truth[cid][i] for i in range(len(truth[cid]))])
-                    for x, y in loader:
-                        opt.zero_grad()
-                        F.cross_entropy(_logits(self.ref, x.to(device)), t[y].to(device)).backward()
-                        opt.step()
+                perm = torch.randperm(len(T), generator=gen)
+                for s in range(0, len(T), bs):
+                    j = perm[s:s + bs]
+                    x = X[j].to(device).float().div_(255).sub_(.5).div_(.5)
+                    opt.zero_grad()
+                    F.cross_entropy(_logits(self.ref, x), T[j].to(device)).backward()
+                    opt.step()
             torch.save(self.ref.state_dict(), f)
         self.ref.eval()
         self.ceiling = None
