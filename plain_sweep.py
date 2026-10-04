@@ -14,6 +14,7 @@ import argparse
 import itertools
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -96,7 +97,8 @@ def main():
     p.add_argument('--jobs', type=int, default=3, help='runs at once')
     p.add_argument('--workers', type=int, default=1, help='client threads per run')
     p.add_argument('--device', default='cuda')
-    p.add_argument('--gpus', default='', help='e.g. "0 1": runs round-robin over these GPUs')
+    p.add_argument('--gpus', default='', help='e.g. "0 1": every run gets a GPU of its own from this list (at most '
+                                             'one run per GPU at a time, so --jobs <= number of GPUs)')
     p.add_argument('--data', default=DATA)
     p.add_argument('--extra', default='--keep-frac 1.0', help='flags for every run')
     p.add_argument('--conf', type=Path, default=Path('config.yaml'))
@@ -113,6 +115,11 @@ def main():
     grid = json.loads(a.grid) if a.grid else GRID
     combos = grid if isinstance(grid, list) else [dict(zip(grid, v)) for v in itertools.product(*grid.values())]
     gpus = a.gpus.split()
+    free = queue.Queue()                              # GPUs not in use: a run takes one, gives it back after
+    for g in gpus:
+        free.put(g)
+    if gpus and a.jobs > len(gpus):
+        sys.exit(f'--jobs {a.jobs} > {len(gpus)} GPUs in --gpus: at most one run per GPU')
     (a.out / 'confs').mkdir(parents=True, exist_ok=True)
     print(f'{len(combos)} runs, {a.jobs} at a time -> {a.out}', flush=True)
     u = a.out / 'union_check'                         # union only (0 rounds): also loads / downloads the data
@@ -121,7 +128,8 @@ def main():
         print('union check ...', flush=True)
         with open(u / 'run.log', 'w') as log:
             if subprocess.call([sys.executable, '-m', 'secure_code_no_cluster', *a.data.split(), *SCHEMES[a.scheme],
-                                *a.extra.split(), '--rounds', '0', '--device', a.device, '--no-progress',
+                                *a.extra.split(), '--no-heter', '--rounds', '0', '--device', a.device,
+                                '--no-progress',
                                 '--output', str(u)], stdout=log, stderr=subprocess.STDOUT):
                 sys.exit(f'union check failed: {u}/run.log')
     from secure_code_no_cluster import format_union
@@ -161,7 +169,8 @@ def main():
         cmd = [sys.executable, '-m', 'secure_code_no_cluster', *a.data.split(), *SCHEMES[a.scheme],
                '--exp-conf', str(yml), *cli, *a.extra.split(), '--rounds', str(a.rounds), '--device', a.device,
                '--workers', str(a.workers), '--no-progress', '--output', str(d), *resume]
-        env = dict(os.environ, **({'CUDA_VISIBLE_DEVICES': gpus[i % len(gpus)]} if gpus else {}))
+        gpu = free.get() if gpus else None
+        env = dict(os.environ, **({'CUDA_VISIBLE_DEVICES': gpu} if gpu is not None else {}))
         with open(d / 'run.log', 'a') as log:
             p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
             while i == 0 and not loaded.is_set() and p.poll() is None:
@@ -171,6 +180,8 @@ def main():
             if i == 0:
                 loaded.set()                                       # failed early: let the others try
             rc = p.wait()
+        if gpu is not None:
+            free.put(gpu)
         if rc == 0:
             (d / 'DONE').touch()
         s = scores(d)

@@ -58,6 +58,69 @@ class _RWLock:
 
 
 _GPU = _RWLock()
+def diff_augment(x):
+    """DiffAugment (Zhao et al., NeurIPS 2020), policy color + translation + cutout, per image and
+    differentiable: applied to every image the discriminator sees (real and generated, in the D and the
+    G step) so a D trained on few images cannot simply memorise them (config gan_diffaug)."""
+    n, dev = len(x), x.device
+    r = lambda: torch.rand(n, 1, 1, 1, device=dev)
+    x = x + (r() - .5)                                                   # brightness
+    m = x.mean(1, keepdim=True)
+    x = (x - m) * (r() * 2) + m                                          # saturation
+    m = x.mean((1, 2, 3), keepdim=True)
+    x = (x - m) * (r() + .5) + m                                         # contrast
+    theta = torch.zeros(n, 2, 3, device=dev)                             # translation: up to 1/8 of the side
+    theta[:, 0, 0] = theta[:, 1, 1] = 1.
+    theta[:, :, 2] = (torch.rand(n, 2, device=dev) * 2 - 1) * .25
+    grid = nn.functional.affine_grid(theta, x.shape, align_corners=False)
+    x = nn.functional.grid_sample(x, grid, padding_mode='zeros', align_corners=False)
+    h, w = x.shape[2:]                                                   # cutout: one half-size square
+    cy = torch.randint(0, h, (n, 1, 1), device=dev)
+    cx = torch.randint(0, w, (n, 1, 1), device=dev)
+    yy = torch.arange(h, device=dev).view(1, h, 1)
+    xx = torch.arange(w, device=dev).view(1, 1, w)
+    keep = ((yy - cy).abs() >= h // 4) | ((xx - cx).abs() >= w // 4)
+    return x * keep.unsqueeze(1).to(x.dtype)
+
+
+class _SpectralNorm(nn.Module):
+    """W / sigma(W), sigma by one power iteration per training step (Miyato et al.). Own small version:
+    unlike torch's (hooks / parametrizations) it can be deep-copied and pickled after a forward pass
+    (the client worker processes copy D)."""
+
+    def __init__(self, layer):
+        super().__init__()
+        self.layer = layer
+        self.register_buffer('u', nn.functional.normalize(torch.randn(layer.weight.shape[0]), dim=0))
+
+    def forward(self, x):
+        w = self.layer.weight.flatten(1)
+        with torch.no_grad():
+            v = nn.functional.normalize(w.t() @ self.u, dim=0)
+            u = nn.functional.normalize(w @ v, dim=0)
+            if self.training:
+                self.u.copy_(u)
+        weight = self.layer.weight / (u @ w @ v)
+        L = self.layer
+        if isinstance(L, nn.Conv2d):
+            return nn.functional.conv2d(x, weight, L.bias, L.stride, L.padding, L.dilation, L.groups)
+        return nn.functional.linear(x, weight, L.bias)
+
+
+def spectral_discriminator(D):
+    """Spectral normalisation on every conv / linear layer of D, BatchNorm removed (config
+    gan_spectral_norm). Idempotent (a worker gets an already wrapped D)."""
+    for m in list(D.modules()):
+        if isinstance(m, _SpectralNorm):
+            continue
+        for cname, c in list(m.named_children()):
+            if isinstance(c, (nn.Conv2d, nn.Linear)):
+                setattr(m, cname, _SpectralNorm(c))
+            elif isinstance(c, nn.BatchNorm2d):
+                setattr(m, cname, nn.Identity())
+    return D
+
+
 GRAPH_WARMUP = 3                                  # eager steps (side stream) before a capture
 
 
@@ -252,7 +315,10 @@ class ClientCBNGAN:
     def __init__(self, generator, discriminator, config=None, device='cpu', seed=None):
         config = config or {}
         self.config = config
+        if config.get('gan_spectral_norm', False):
+            discriminator = spectral_discriminator(discriminator)
         self.device, self.G, self.D = device, generator.to(device), discriminator.to(device)
+        self.aug = diff_augment if config.get('gan_diffaug', False) else (lambda x: x)
         self.noise_dim = config.get('gen_noise_dim', 128)
         self.epochs = config.get('gen_local_epochs', 1)
         cuda = str(device).startswith('cuda')
@@ -321,12 +387,12 @@ class ClientCBNGAN:
         bce = nn.functional.binary_cross_entropy_with_logits
         real, fake = torch.ones(len(x), 1, device=x.device), torch.zeros(len(x), 1, device=x.device)
         self.d_opt.zero_grad()
-        d_loss = .5 * (bce(self.D(x, y).view(-1, 1), real)
-                       + bce(self.D(self.G(z1, y).detach(), y).view(-1, 1), fake))
+        d_loss = .5 * (bce(self.D(self.aug(x), y).view(-1, 1), real)
+                       + bce(self.D(self.aug(self.G(z1, y).detach()), y).view(-1, 1), fake))
         d_loss.backward(); self.d_opt.step()
         self.g_opt.zero_grad()
         fake_x = self.G(z2, y)
-        g_loss = bce(self.D(fake_x, y).view(-1, 1), real)
+        g_loss = bce(self.D(self.aug(fake_x), y).view(-1, 1), real)
         if self.guide is not None:                        # heter: the client's own classifier must
             out = self.guide(fake_x)                      # recognise the generated class
             g_loss = g_loss + self.guide_weight * nn.functional.cross_entropy(

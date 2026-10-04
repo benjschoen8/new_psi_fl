@@ -38,21 +38,26 @@ class GlobalClassifierTrainer:
             self.model = self.factory(len(ids)).to(self.device)
             self.optimizer = getattr(torch.optim, config.get('global_model_optim', 'Adam'))(
                 self.model.parameters(), lr=config.get('global_model_optim_lr', 1e-3))
-        xs, ys = [], []
-        for group, labels in mapping.items():
-            generator = generators[group].to(self.device).eval()
-            for local, global_id in labels.items():
-                z = torch.randn(samples, config.get('gen_noise_dim', 128), device=self.device)
-                y = torch.full((samples,), local, dtype=torch.long, device=self.device)
-                with torch.no_grad():
-                    xs.append(generator(z, y).cpu())
-                ys.append(torch.full((samples,), global_id, dtype=torch.long))
-        loader = DataLoader(TensorDataset(torch.cat(xs), torch.cat(ys)),
-                            batch_size=config.get('batch_size', 64), shuffle=True)
+        def synthetic():
+            xs, ys = [], []
+            for group, labels in mapping.items():
+                generator = generators[group].to(self.device).eval()
+                for local, global_id in labels.items():
+                    z = torch.randn(samples, config.get('gen_noise_dim', 128), device=self.device)
+                    y = torch.full((samples,), local, dtype=torch.long, device=self.device)
+                    with torch.no_grad():
+                        xs.append(generator(z, y).cpu())
+                    ys.append(torch.full((samples,), global_id, dtype=torch.long))
+            return DataLoader(TensorDataset(torch.cat(xs), torch.cat(ys)),
+                              batch_size=config.get('batch_size', 64), shuffle=True)
+
+        loader = synthetic()
         self.model.train()
         criterion = torch.nn.CrossEntropyLoss()
         aug = config.get('global_augment', False)
-        for _ in range(epochs):
+        for epoch in range(epochs):
+            if epoch and config.get('global_resample', False):        # fresh synthetic images every epoch
+                loader = synthetic()
             for images, labels in loader:
                 self.optimizer.zero_grad()
                 images = images.to(self.device)

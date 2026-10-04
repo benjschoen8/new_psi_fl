@@ -8,21 +8,26 @@
 #   WARMUP=20 PHASES="1 4" EXTRA="--keep-frac 1.0" bash cifar_stl_run_experiments.sh
 #   SWEEP=1 bash cifar_stl_run_experiments.sh   # instead: plain_sweep.py (union check first, then the
 #       candidate settings, 10 rounds, with --diagnostics; global_augment: shifted / flipped / noisy synthetic
-#       images for the server classifier, training.augment); JOBS, WORKERS, ROUNDS, OUT, GRID, SWEEP_ARGS override.
-#       Results: python plain_sweep.py --summary runs/cifar_stl_aug;  per run: --report <run folder>
+#       images for the server classifier, training.augment; gan_diffaug / gan_spectral_norm: DiffAugment and
+#       spectral normalisation in the clients' GAN training, secfl/cbn_gan.py; global_resample: fresh synthetic
+#       images every classifier epoch); gen_label_batch 32, widths 64,32,16 (best so far); --heter is the default
+#       (local classifiers guide the generators): the list compares no guide, guide epochs and weights; JOBS, WORKERS, ROUNDS, OUT, GRID, SWEEP_ARGS override;
+#       GPUS="0 1" JOBS=2: one run per GPU at a time.
+#       Results: python plain_sweep.py --summary runs/cifar_stl_guide;  per run: --report <run folder>
 cd "$(dirname "$0")"
 CLASSES=${CLASSES:-4,7}
 SHARE=${SHARE:-split}
 export DATA="--num-train-cifar10 3 --num-train-stl10 3 --num-train-mnist 0 --num-train-emnist 0 --class-subsets $CLASSES --class-share $SHARE --min-holders 1"
 if [[ ${SWEEP:-0} == 1 ]]; then
     GRID=${GRID:-'[
- {"gen_label_batch":32, "--gen-widths":"64,32,16",  "--warmup-epochs":60},
- {"gen_label_batch":32, "--gen-widths":"64,32,16",  "--warmup-epochs":60,  "global_augment":true},
- {"gen_label_batch":32, "--gen-widths":"64,32,16",  "--warmup-epochs":120, "global_augment":true},
- {"gen_label_batch":64, "--gen-widths":"128,64,32", "--warmup-epochs":120, "global_augment":true}]'}
-    exec ${PY:-python} plain_sweep.py --data="$DATA" --jobs "${JOBS:-3}" --workers "${WORKERS:-6}" \
-        --rounds "${ROUNDS:-10}" --out "${OUT:-runs/cifar_stl_aug}" --grid "$GRID" \
-        --extra="--keep-frac 1.0 --diagnostics" ${SWEEP_ARGS:-}
+ {"--warmup-epochs":60, "global_augment":true, "gan_diffaug":true, "gan_spectral_norm":true, "global_resample":true, "--no-heter":""},
+ {"--warmup-epochs":60, "global_augment":true, "gan_diffaug":true, "gan_spectral_norm":true, "global_resample":true, "--guide-epochs":5,  "--guide-weight":0.5},
+ {"--warmup-epochs":60, "global_augment":true, "gan_diffaug":true, "gan_spectral_norm":true, "global_resample":true, "--guide-epochs":20, "--guide-weight":0.5},
+ {"--warmup-epochs":60, "global_augment":true, "gan_diffaug":true, "gan_spectral_norm":true, "global_resample":true, "--guide-epochs":20, "--guide-weight":1.0},
+ {"--warmup-epochs":60, "global_augment":true, "gan_diffaug":true, "gan_spectral_norm":true, "global_resample":true, "--guide-epochs":50, "--guide-weight":0.5}]'}
+    exec ${PY:-python} plain_sweep.py --data="$DATA" --jobs "${JOBS:-3}" --workers "${WORKERS:-1}" --gpus "${GPUS:-}" \
+        --rounds "${ROUNDS:-10}" --out "${OUT:-runs/cifar_stl_guide}" --grid "$GRID" \
+        --extra="--keep-frac 1.0 --diagnostics --gen-widths 64,32,16" ${SWEEP_ARGS:-}
 fi
 export OUT=${OUT:-runs/cifar_stl_${CLASSES/,/-}_$SHARE}
 exec bash run_experiments.sh

@@ -440,11 +440,12 @@ def main():
                    help='cbn: experimenter-only per-round diagnostics in metrics.jsonl (diag) and <out>/diag/: '
                         'real-data ceiling, per-class accuracy and confusions, generator fidelity / diversity, '
                         'sample grids (diagnostics.py)')
-    p.add_argument('--heter', action='store_true',
-                   help='cbn, heter version: every client trains its own heterogeneous classifier (nets.'
+    p.add_argument('--heter', action=argparse.BooleanOptionalAction, default=None,
+                   help='cbn, heter version (default on; --no-heter: off; a resumed run keeps its own): every client trains its own heterogeneous classifier (nets.'
                         'get_heterogeneous_model: MLP, CNN, ResNet8/18, MobileNetV2/V3, LeNet, AlexNet, '
                         'ShuffleNetV2, SqueezeNet by client id) on its real data; it guides its generator')
-    p.add_argument('--guide-epochs', type=int, default=5, help='--heter: classifier training epochs (cached)')
+    p.add_argument('--guide-epochs', type=int, default=None,
+                   help='--heter: classifier training epochs (cached; default 20, a resumed run keeps its own)')
     p.add_argument('--guide-weight', type=float, default=.5,
                    help='--heter: generator loss = GAN loss + weight x CE(classifier(G(z, y)), y)')
     p.add_argument('--client-procs', choices=('auto', 'on', 'off'), default='auto',
@@ -466,10 +467,14 @@ def main():
     p.add_argument('--quant-scale0', type=float, default=0.05, help='cbn: first-round scale floor (plain and secagg)')
     p.add_argument('--fast-samples', type=int, default=256, help='per-client image cap under --fast')
     args = p.parse_args()
-    if args.gen_widths is None:                                      # a resumed run keeps its own widths
-        old = args.resume.parent / 'args.json' if args.resume else None
-        args.gen_widths = (json.loads(old.read_text()).get('gen_widths') if old and old.exists() else None) \
-            or '128,64,32'
+    old = args.resume.parent / 'args.json' if args.resume else None   # a resumed run keeps its own settings
+    old = json.loads(old.read_text()) if old and old.exists() else {}
+    if args.gen_widths is None:
+        args.gen_widths = old.get('gen_widths') or '128,64,32'
+    if args.heter is None:                                            # (runs from before: off, guide 5)
+        args.heter = old.get('heter', 'True' if not old else 'False') == 'True'
+    if args.guide_epochs is None:
+        args.guide_epochs = int(old.get('guide_epochs', 20 if not old else 5))
     from setup import resolve_device
     args.device = resolve_device(args.device)
     seed_all(args.seed)
