@@ -1,0 +1,95 @@
+\section{Our Proposed Scheme}
+\label{sec:scheme}
+
+The scheme consists of an offline phase, run once before training, and an online phase of training
+rounds. This section describes the offline phase. Its first step builds the \emph{union list}: one
+entry per distinct concept held by any client, such that labels of different clients that denote the
+same concept share one entry. The list is built without revealing any client's label set
+$\mathcal{Y}_i$ to the other clients or to the aggregator.
+
+\subsection{Union List by Circuit PSI}
+\label{sec:union}
+
+\paragraph{Goal}
+For every pair of labels $y_i\in\mathcal{Y}_i$ and $y_j\in\mathcal{Y}_j$ of different clients, the
+clients must decide whether $y_i$ and $y_j$ denote the same concept, i.e., whether both
+$d_{\mathrm{sem}}(y_i,y_j)$ and $d_{\mathrm{vis}}(D_i^{(y_i)},D_j^{(y_j)})$ are small. A plain PSI
+would reveal which labels match. We therefore use circuit PSI: the pairwise matches and the
+resulting groups stay inside an MPC among the clients, and the only output is, for every label, a
+random group secret $K$ that is equal for all labels of one concept and is revealed only to the
+label's owner. From these secrets the union list is assembled by a secure sum
+(Sec.~\ref{sec:union-secsum}).
+
+\paragraph{Semantic description of a label}
+Each client $C_i$ describes every label $y\in\mathcal{Y}_i$ by a keyword $w_i(y)$, a short word or
+phrase naming the concept of $D_i^{(y)}$, chosen locally. Two matching modes are supported.
+\begin{itemize}
+  \item \emph{Exact mode.} When the application domain shares a public vocabulary (for example, all
+  clients are hospitals using a common medical terminology), the clients take $w_i(y)$ from a
+  \emph{public dictionary} $\mathcal{W}$ of canonical terms, with synonyms folded into one entry.
+  Two labels then match semantically iff their keywords are equal, which the MPC tests on hashed
+  values $H_{\mathrm{n}}(w_i(y))$.
+  \item \emph{Similarity mode.} When the clients do not agree on a common vocabulary, or do not want
+  to commit their categories to one, each client writes its keyword freely. A public text encoder
+  $E$ maps a keyword to a unit vector $\mathbf{e}=E(w_i(y))$, and the semantic test is the CSLS
+  criterion
+  \begin{equation}
+    2\langle\mathbf{e},\mathbf{e}'\rangle-r-r'\ \ge\ \tau ,
+    \label{eq:csls}
+  \end{equation}
+  where $r$ is the mean similarity of $\mathbf{e}$ to its $h$ nearest words of a public anchor
+  vocabulary. The hub terms $r,r'$ discount generic words that are close to everything, and the
+  threshold $\tau$ is public.
+\end{itemize}
+
+\paragraph{Visual description of a label}
+A keyword alone cannot tell, e.g., a handwritten ``3'' from a printed one, or a sketch of a cat from
+a photograph. Each label is therefore also described by its samples, without revealing them. From a
+public seed, every client generates the same \emph{probe set}: $N_I$ random images
+$\boldsymbol\xi_1,\dots,\boldsymbol\xi_{N_I}$, together with their coordinates under a fixed public
+signature function $\sigma$ (e.g., a randomly initialized convolutional feature map). For a label
+$y$, client $C_i$ computes the mean signature $\bar{\boldsymbol\sigma}_i(y)$ of the samples in
+$D_i^{(y)}$ and records which $k$ probes lie nearest to it:
+\begin{equation}
+  \mathbf{s}_i(y)\in\{0,1\}^{N_I},\qquad \mathbf{s}_i(y)[j]=1 \iff
+  \boldsymbol\xi_j \text{ is among the $k$ nearest probes to } \bar{\boldsymbol\sigma}_i(y).
+\end{equation}
+Two labels are visually similar if their probe sets overlap,
+$\langle\mathbf{s}_i(y_i),\mathbf{s}_j(y_j)\rangle\ge t$, a coarse and public test that approximates
+a small $d_{\mathrm{vis}}$. Only the $k$ probe indices enter the computation; neither samples nor
+signatures leave the client.
+
+\paragraph{Secure matching and grouping}
+Each client turns each label into a row $(v,\phi,\mathbf{s})$ with a valid bit $v$, the keyword
+feature $\phi$ (hashed keyword or fixed-point embedding with its hub term), and the probe
+indicator $\mathbf{s}$; dummy rows with $v=0$ pad every client to the same number of rows $m$, so the
+row count hides $|\mathcal{Y}_i|$. The clients Shamir-share their rows among themselves and evaluate,
+inside an honest-majority MPC, the match bit of every pair of rows $a,a'$ of different clients,
+\begin{equation}
+  \mu_{aa'} = v_a v_{a'}\,\big[\langle\mathbf{s}_a,\mathbf{s}_{a'}\rangle\ge t\big]\,
+  \mathrm{KW}(\phi_a,\phi_{a'}),
+\end{equation}
+where $\mathrm{KW}$ is keyword equality (exact mode) or test~\eqref{eq:csls}. Matching
+is not transitive, so the MPC then merges matching rows into connected components by min-label
+propagation; every row carries a joint random secret, and every row of a component ends with the
+secret of its root. Finally each owner receives the secret $K$ of its own rows and nothing else.
+Labels of one concept, at any clients, now hold the same $K$; no party sees a match bit, a group, or
+another client's secrets, and since $K$ is random, it says nothing about the label it stands for.
+
+\subsection{Delivering the Union List to the Aggregator}
+\label{sec:union-secsum}
+
+The aggregator should learn the union list but not who holds which entry. Each client maps every
+secret $K$ it holds to a bucket $\pi(K)=H_{\mathrm b}(K)\in[2^\beta]$ and builds a vector
+$\mathbf{y}_i$ of $2^\beta$ entries: a uniformly random nonzero value $\alpha$ in each of its buckets,
+together with a check value $\alpha\cdot\mathrm{chk}(K)$, and zeros elsewhere. The clients run the
+secure sum of Sec.~\ref{sec:prelim} (secure aggregation), $\boldsymbol\Sigma=\mathsf{SecSum}(\{\mathbf{y}_i\})$,
+which gives the aggregator $\sum_i\mathbf{y}_i$ and nothing else. Holders of one concept write into
+the same bucket, so the nonzero entries of $\boldsymbol\Sigma$ are exactly the union list; since a sum
+of random values is random, it hides how many clients hold each entry. The aggregator posts the
+occupied buckets, sorted, on $\mathsf{BB}$; their number $L$ is the size of the union. A bucket that
+received two different secrets fails the check $\boldsymbol\Sigma[\pi]_1=\mathrm{chk}(K)\,
+\boldsymbol\Sigma[\pi]_0$ at its holders, and the step is repeated with a fresh public salt. Because
+buckets are hashes of secrets known only to their holders, the posted list reveals no label to the
+aggregator or to any other client; each client finds the position of its own buckets in the list,
+which becomes the index of the corresponding label in the next step.

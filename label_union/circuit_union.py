@@ -26,11 +26,15 @@ Public: the encoder + 2000 anchor words (fuzzy keywords), the 45 seeded image an
 Leakage: Aggregator U and the pk list; any < n/2 clients: U, their own outputs, the 'converged'
 bits (= how many propagation steps the longest chain of matches needed, usually 1).
 
-ponytail: step C runs here as its ideal functionality (the exact integer computation the MPC
-evaluates, on the same fixed-point inputs), so accuracy and indices are what the MPC would produce;
-its cost is the operation count of mpc_cost (Shamir/DN07), to be measured with MP-SPDZ for the paper.
+Step C runs as a real MPC in MP-SPDZ (mpc/circuit_group.mpc via label_union.mpspdz_group: Shamir,
+honest majority, n parties on this host) when the environment variable MPSPDZ points to an MP-SPDZ
+directory; stats['mpc']['measured'] then holds its time and traffic, and its grouping is checked
+against the ideal functionality. Without MPSPDZ, step C runs as its ideal functionality (the same
+integer computation on the same fixed-point inputs, so indices are what the MPC produces) and the
+cost is the operation count of mpc_cost.
 """
 import functools
+import os
 import secrets
 import time
 
@@ -162,12 +166,21 @@ def circuit_union_with_keys(client_labels, client_keywords, client_sets=None, fu
         for x in labels:
             owner.append((c, x))
             rows.append((kws[c][x], imgs[c][x] if imgs else None))
-    root, steps = group(rows, tau, t, [c for c, _ in owner])                      # C (ideal functionality)
+    m = m or max(len(l) for l in client_labels)
+    owners = [c for c, _ in owner]
+    root, steps = group(rows, tau, t, owners)                                     # C (ideal functionality)
     kappa = {r: secrets.token_bytes(16) for r in set(root)}
     K = [dict() for _ in client_labels]
     for (c, x), r in zip(owner, root):
         K[c][x] = kappa[r]                                                        # opened to the owner only
-    m = m or max(len(l) for l in client_labels)
+    measured = None
+    if secure and os.environ.get('MPSPDZ'):                                       # C as a real MPC
+        from label_union.mpspdz_group import mpspdz_group
+        root_m, measured, k_m = mpspdz_group(rows, owners, tau, t, m=m)
+        if root_m != root:
+            raise RuntimeError('MP-SPDZ grouping differs from the ideal functionality')
+        for (c, x), k in zip(owner, k_m):
+            K[c][x] = k.to_bytes(17, 'big', signed=True)                          # field element as bytes
     dim = 384 if fuzzy else 1
     cost = mpc_cost(len(client_labels), m, dim, 45 if imgs else 0, D, steps)
     group_seconds = time.perf_counter() - t0
@@ -184,7 +197,7 @@ def circuit_union_with_keys(client_labels, client_keywords, client_sets=None, fu
     index = [{x: idx[c][v] for x, v in K[c].items()} for c in range(len(K))]
     sk_out = [{x: sks[c][v] for x, v in K[c].items()} for c in range(len(K))]
     sa, n = stats['secagg'], len(client_labels)
-    stats.update(method='circuit-psi', mpc=dict(cost, estimated=True, tau=tau, t=t, D=D),
+    stats.update(method='circuit-psi', mpc=dict(cost, estimated=True, tau=tau, t=t, D=D, measured=measured),
                  group_seconds=group_seconds, seconds=time.perf_counter() - t0,
                  setup_upload_bytes_per_client=cost['bytes_per_client'] + (sa['payload_up'] + sa['control_up']) / n,
                  setup_download_bytes_per_client=cost['bytes_per_client'] + sa['control_down'] / n + U * (4 + 32))

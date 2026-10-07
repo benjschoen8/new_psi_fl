@@ -1,0 +1,289 @@
+\section{Our Proposed Scheme}
+\label{sec:scheme}
+
+Our goal is a global classifier $F$ over the union of all clients' classes, trained as in
+GeFL~\cite{gefl}: clients train generators on their private data and $\Agg$ trains $F$ on synthetic
+images only. Unlike GeFL, labels are private, so the clients must also find out, without revealing
+any label, which of their labels denote the same class; all of this under the threat model of
+Sec.~\ref{sec:model}. We split the scheme into an \emph{offline phase}, run once before training,
+and an \emph{online phase} of $R$ training rounds. At the start of the offline phase every client
+$C_i$ already has its own classifier $f_i$, trained on its real data; architectures may differ
+between clients (compute budgets, tasks). $\SecAgg$ is used as the black box of
+Sec.~\ref{sec:prelim}: on one vector $\mathbf{y}_i\in\mathbb{Z}_{2^\ell}^{d}$ per client it outputs
+$\sum_i\mathbf{y}_i\bmod 2^\ell$ to $\Agg$ and nothing else; we write
+$\boldsymbol\Sigma\gets\SecAgg_\ell(\{\mathbf{y}_i\})$.
+
+% ======================================================================================
+\subsection{Offline Phase}
+\label{sec:offline}
+
+\paragraph{Target}
+The offline phase builds a private \emph{union table} with four properties.
+\begin{enumerate}[label=(O\arabic*),leftmargin=*,itemsep=0pt]
+  \item \emph{Label-to-index mapping.} Every class in the union gets one index $g\in[U]$, and every
+  client learns $\mathrm{idx}_i(y)$ for each of its labels $y$ and nothing about other labels.
+  \item \emph{Index table for $\Agg$.} $\Agg$ obtains the table $[U]$ with one public key $pk_g$ per
+  index. It knows each class by its index only, which is all it needs to train $F$; class names
+  never leave the clients.
+  \item \emph{Hidden aggregation groups.} Labels of different clients that denote the same class
+  form one group and share one index. Nobody, $\Agg$ included, learns which clients form a group,
+  and nobody sees the groups of other classes.
+  \item \emph{Group keys.} The holders of a class share a secret key $\mathrm{sk}_g$; $\Agg$
+  receives $pk_g$ without learning who holds the class, or how many do.
+\end{enumerate}
+% NOTE: 原本的目標2寫「給 aggregator 一個有明確語義的 semantic table」。目前框架刻意不給 Agg 名稱
+% （它只知道 index，訓練 F 已足夠）。如果論文要 Agg 知道每個 index 的語義，需要多一步公開名稱的聯集，
+% 並在 Sec. security 寫明這個額外洩漏。
+
+\paragraph{Workflow}
+\begin{enumerate}[label=\arabic*.,leftmargin=*,itemsep=0pt]
+  \item \emph{Circuit PSI} (Sec.~\ref{sec:setup}): the clients compute the groups in MPC; each label's
+  owner receives only a random group secret $K$, equal for all labels of one class (O3).
+  \item \emph{Index finding} (Sec.~\ref{sec:index}): every client writes a random value into the
+  bucket $\pi(K)$ of each of its secrets; one $\SecAgg$ gives $\Agg$ the occupied buckets, which it
+  posts sorted on $\BB$ as the index table.
+  \item \emph{Index lookup}: each client finds the rank of $\pi(K)$ in the posted list and stores
+  $\mathrm{idx}_i(y)$ (O1, O2). Buckets are hashes of secrets, so the list reveals no label.
+  \item \emph{Key grouping} (Sec.~\ref{sec:keys}): every holder derives $\mathrm{sk}_g=H_{\mathrm{sk}}(K)$;
+  a second $\SecAgg$ gives $\Agg$ exactly $pk_g$ per index, which it posts on $\BB$ (O4).
+  \item \emph{Initial generator}: $\Agg$ posts the public initial generator $\theta^{(0)}$ with its
+  seed on $\BB$. Clients may then train it locally for $E_w$ warm-up epochs on their own labels;
+  nothing is sent.
+\end{enumerate}
+$\Agg$ thus learns only $U$ and $pk_0,\dots,pk_{U-1}$ (Alg.~\ref{alg:setup}, Fig.~\ref{fig:setup}).
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth,page=1,trim=90 68 110 64,clip]{figs/protocol_steps.pdf}
+  \caption{Offline phase (once): (1)~circuit PSI; (2)~SecAgg of bucket vectors; (3)~union table
+  posted; (4)~indices; (5)~SecAgg of public keys, posted on $\BB$.}
+  \label{fig:setup}
+\end{figure}
+
+\subsubsection{Private Grouping by Circuit PSI}
+\label{sec:setup}
+The grouping is the only step run in MPC among the clients; index finding and key grouping are two
+calls to $\SecAgg$ with $\Agg$. Each label becomes a row $(v_a,\phi_a,\mathbf{s}_a)$
+(Alg.~\ref{alg:rows}): a valid bit; a keyword feature (hashed name or
+fixed-point embedding $\mathbf{e}_a$ with hub term $r_a$); and the indicator
+$\mathbf{s}_a\in\{0,1\}^{N_I}$ of the $k$ image anchors nearest to the label's mean signature. Dummy
+rows pad to $m$. Rows are Shamir-shared~\cite{shamir1979share} with degree $\lfloor(n-1)/2\rfloor$,
+and the clients evaluate $\Fgrp$ (Alg.~\ref{alg:group}) with an honest-majority
+protocol~\cite{damgard2007scalable}. For each pair of rows of different clients,
+\begin{equation}
+  \mu_{aa'}=v_a v_{a'}\,\big[\langle\mathbf{s}_a,\mathbf{s}_{a'}\rangle\ge t\big]\,
+  \mathrm{KW}(\phi_a,\phi_{a'}),
+  \label{eq:match}
+\end{equation}
+where $\mathrm{KW}$ is equality for names, and for embeddings the CSLS
+test~\cite{conneau2018word} $2\langle\mathbf{e}_a,\mathbf{e}_{a'}\rangle-r_a-r_{a'}\ge\tau$, which
+discounts hub words. Matching is not transitive, so $\Fgrp$ takes connected components by min-label
+propagation, carrying a joint random secret per row, and opens to each owner only the secret $K$ of
+its rows. Rows of one class share $K$; nobody sees the matches or the groups, and since $K$ is
+random, $\Agg$ cannot test candidate names.
+
+\begin{algorithm}[t]
+\caption{$\mathsf{LocalRows}$, run by $C_i$ (no communication)}
+\label{alg:rows}
+\begin{algorithmic}[1]
+\Require $\mathcal{Y}_i$; $w_i(y)$, $X_i(y)$ for $y\in\mathcal{Y}_i$; $\pp$; mode $\in\{$exact, fuzzy$\}$
+\Ensure rows $R_i[1..m]$; row $a\le|\mathcal{Y}_i|$ belongs to label $y_a$
+\For{$a=1,\dots,|\mathcal{Y}_i|$}
+  \State $w\gets\mathrm{Norm}(w_i(y_a))$ \Comment{NFKC, numerals spelled out}
+  \If{mode $=$ exact}
+    \State $\phi_a\gets(\textsf{name},\,H_{\mathrm{n}}(w))$
+  \Else
+    \State $\mathbf{e}\gets E(w)$;\ \ $r\gets\frac1h\sum_{j\in\mathrm{top}_h}\langle\mathbf{e},\boldsymbol{\epsilon}_j\rangle$
+    \State $\phi_a\gets(\textsf{emb},\,\lfloor2^{f}\mathbf{e}\rceil,\,\lfloor2^{2f}r\rceil)$ \Comment{fixed point}
+  \EndIf
+  \State $\bar{\boldsymbol\sigma}\gets\sigma\big(X_i(y_a)\big)$ \Comment{mean signature}
+  \State $\mathbf{s}_a[j]\gets1$ iff $\boldsymbol{\xi}_j$ is among the $k$ nearest to $\bar{\boldsymbol\sigma}$ (cosine), else $0$
+  \State $R_i[a]\gets(1,\ \phi_a,\ \mathbf{s}_a)$
+\EndFor
+\For{$a=|\mathcal{Y}_i|+1,\dots,m$}
+  \State $R_i[a]\gets(0,\ \mathbf{0},\ \mathbf{0})$ \Comment{dummy row}
+\EndFor
+\State \Return $R_i$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{$\Fgrp$: grouping, evaluated by the clients on Shamir shares}
+\label{alg:group}
+\begin{algorithmic}[1]
+\Require shared rows of all clients, $N=nm$ rows $(v_a,\phi_a,\mathbf{s}_a)$ with owners $o(a)$; $\tau$, $t$, $T_p$
+\Ensure $K_a$, opened to $o(a)$ only, for every row $a$
+\For{all pairs $a<a'$, $o(a)\neq o(a')$, \textbf{in parallel}}
+  \State $\mu_{aa'}\gets\mu_{a'a}\gets$ \eqref{eq:match} \Comment{never opened}
+\EndFor
+\For{$a=1,\dots,N$}
+  \State $\ell_a\gets a$;\quad $\kappa_a\sample\{0,1\}^{128}$ \Comment{joint randomness}
+\EndFor
+\Repeat
+  \For{$T_p$ steps, all $a$ \textbf{in parallel}}
+    \State $(\ell_a,\kappa_a)\gets$ pair with the least $\ell$ among $(\ell_a,\kappa_a)$ and $\{(\ell_{a'},\kappa_{a'}):\mu_{aa'}=1\}$
+  \EndFor
+  \State open $\chi\gets[\,$one more step would change some $\ell_a\,]$
+\Until{$\chi=0$}
+\State open $K_a\gets\kappa_a$ to $o(a)$ only, for all $a$
+\end{algorithmic}
+\end{algorithm}
+
+\subsubsection{Index Finding and Lookup}
+\label{sec:index}
+From its class secrets $\mathcal{K}_i$ each client builds a bucket vector
+$\mathbf{y}_i\in\mathbb{Z}_{2^{64}}^{2^\beta\times2}$: for every $K\in\mathcal{K}_i$ it writes
+$(\alpha,\alpha\,\mathrm{chk}^{\eta}(K))$, $\alpha\sample\mathbb{Z}_{2^{64}}$, into bucket
+$\pi(K)=H_{\mathrm b}^{\eta}(K)$, and zeros elsewhere.
+\begin{itemize}
+  \item \emph{Input:} $\mathbf{y}_1,\dots,\mathbf{y}_n$. \emph{Output to $\Agg$:}
+  $\boldsymbol\Sigma\gets\SecAgg_{64}(\{\mathbf{y}_i\})$.
+\end{itemize}
+$\Agg$ posts the occupied buckets $O=\mathrm{sort}\{\pi:\boldsymbol\Sigma[\pi]\neq\mathbf{0}\}$ with
+their sums. Holders of one class write into the same bucket, and a sum of uniform $\alpha$ hides how
+many did. Each client checks its buckets: a bucket with two different secrets fails
+$\boldsymbol\Sigma[\pi]_1=\mathrm{chk}^{\eta}(K)\,\boldsymbol\Sigma[\pi]_0$ (except w.p.\
+${\approx}2^{-60}$), in which case all clients rehash with the next salt $\eta$, revealing only that
+a collision occurred. The index of a class is the rank of its bucket in $O$, found by each holder
+locally, and $U=|O|$. Since $\pi(K)$ is a hash of a secret only the holders know, $O$ tells
+nobody else which bucket belongs to which class.
+
+\subsubsection{Key Grouping}
+\label{sec:keys}
+Each client derives the class key pair $\mathrm{sk}_K=H_{\mathrm{sk}}(K)$, $pk_K=\mathrm{sk}_K B$;
+all holders of a class derive the same pair. To publish one key per index without revealing the
+holders, each client builds $\boldsymbol\psi_i\in\mathbb{Z}_{2^{64}}^{U\times17}$ with
+$\boldsymbol\psi_i[\mathrm{idx}(K)]=\alpha\,(1,c_1,\dots,c_{16})$, $c_j$ the 16-bit chunks of $pk_K$,
+and zeros elsewhere.
+\begin{itemize}
+  \item \emph{Input:} $\boldsymbol\psi_1,\dots,\boldsymbol\psi_n$. \emph{Output to $\Agg$:}
+  $\boldsymbol\Psi\gets\SecAgg_{64}(\{\boldsymbol\psi_i\})$.
+\end{itemize}
+From $\Psi_{g,0}=\sum\alpha=2^{\zeta}a'$ ($a'$ odd) and $\Psi_{g,j}=c_j\Psi_{g,0}$, $\Agg$ recovers
+$c_j=(\Psi_{g,j}/2^{\zeta})\,a'^{-1}\bmod 2^{64-\zeta}$ and posts $pk_g$ on $\BB$; $\Psi_{g,0}$ again
+hides the number of holders. Each client keeps $\mathrm{idx}_i(y)$ and $\mathrm{sk}_i(y)$ for its
+labels; the union table is complete.
+
+\begin{algorithm}[t]
+\caption{Offline phase: union table and keys (Fig.~\ref{fig:setup})}
+\label{alg:setup}
+\begin{algorithmic}[1]
+\Require $\pp$, $H(\pp)$ on $\BB$; each $C_i$: $\mathcal{Y}_i$, $w_i$, $X_i$, $f_i$
+\Ensure $C_i$: $\mathrm{idx}_i$, $\mathrm{sk}_i$;\ \ $\Agg$, $\BB$: $O$, $U$, $pk_0,\dots,pk_{U-1}$, $\theta^{(0)}$
+\Statex \textit{Private grouping: circuit PSI among the clients (Sec.~\ref{sec:setup})}
+\State each $C_i$: $R_i\gets\mathsf{LocalRows}(\cdot)$ (Alg.~\ref{alg:rows}); Shamir-share $R_i$, share $j$ encrypted to $C_j$ and relayed by $\Agg$
+\State clients evaluate $\Fgrp$ (Alg.~\ref{alg:group}); $C_i$ gets $K_a$ for its rows
+\State each $C_i$: drop dummies; $\mathcal{K}_i\gets\{K_a\}$; $\mathrm{sk}_K\gets H_{\mathrm{sk}}(K)$, $pk_K\gets\mathrm{sk}_K\cdot B$
+\Statex \textit{Index finding and lookup (Sec.~\ref{sec:index})}
+\State $\eta\gets0$
+\Loop
+  \State each $C_i$: $\mathbf{y}_i\gets\mathbf{0}$; for $K\in\mathcal{K}_i$: $\alpha\sample\mathbb{Z}_{2^{64}}$, $\mathbf{y}_i[\pi(K)]\gets(\alpha,\ \alpha\cdot\mathrm{chk}^{\eta}(K))$
+  \State $\Agg$: $\boldsymbol{\Sigma}\gets\SecAgg_{64}(\{\mathbf{y}_i\})$; post $O\gets\mathrm{sort}\{\pi:\boldsymbol{\Sigma}[\pi]\neq\mathbf{0}\}$ and $\boldsymbol{\Sigma}[O]$
+  \State each $C_i$: $\mathit{ok}_i\gets\bigwedge_{K\in\mathcal{K}_i}\big(\boldsymbol{\Sigma}[\pi(K)]_1=\mathrm{chk}^{\eta}(K)\,\boldsymbol{\Sigma}[\pi(K)]_0\neq0\big)$; announce $\mathit{ok}_i$
+  \If{$\mathit{ok}_i$ for all $i$} \textbf{break} \EndIf
+  \State $\eta\gets\eta+1$ \Comment{bucket collision: rehash}
+\EndLoop
+\State $U\gets|O|$;\ \ each $C_i$: $\mathrm{idx}(K)\gets$ rank of $\pi(K)$ in $O$
+\Statex \textit{Key grouping (Sec.~\ref{sec:keys})}
+\State each $C_i$: $\boldsymbol{\psi}_i\gets\mathbf{0}$; for $K\in\mathcal{K}_i$: $\alpha\sample\mathbb{Z}_{2^{64}}$, $\boldsymbol{\psi}_i[\mathrm{idx}(K)]\gets\alpha\,(1,c_1,\dots,c_{16})$
+\State $\Agg$: $\boldsymbol{\Psi}\gets\SecAgg_{64}(\{\boldsymbol{\psi}_i\})$; decode $pk_g$ from $\boldsymbol{\Psi}[g]$, $g\in[U]$; post on $\BB$
+\State each $C_i$, $y\in\mathcal{Y}_i$: $\mathrm{idx}_i(y)\gets\mathrm{idx}(K_y)$, $\mathrm{sk}_i(y)\gets\mathrm{sk}_{K_y}$
+\Statex \textit{Initial generator}
+\State $\Agg$: post $\theta^{(0)}$ and its seed on $\BB$; each $C_i$ (optional): $E_w$ local warm-up epochs from $\theta^{(0)}$
+\end{algorithmic}
+\end{algorithm}
+
+% ======================================================================================
+\subsection{Online Phase}
+\label{sec:online}
+
+\paragraph{Target}
+The online phase trains the global classifier $F$. It assumes the outputs of the offline phase:
+every $C_i$ holds $\mathrm{idx}_i$, $\mathrm{sk}_i$, its frozen classifier $f_i$ and its
+(warmed-up) generators; $\Agg$ holds $U$ and the keys on $\BB$. Every class $g$ has its own
+generator $G_{\theta_g}$, an unconditional DCGAN that draws only class $g$.
+
+\paragraph{Workflow} Each round $r=1,\dots,R$ (Alg.~\ref{alg:round}, Fig.~\ref{fig:round}):
+\begin{enumerate}[label=\arabic*.,leftmargin=*,itemsep=0pt]
+  \item \emph{Local training} (Sec.~\ref{sec:rounds}): each client trains the generators of all its
+  classes, starting in round~1 from its warmed-up $\theta^{(0)}$ and later from the decrypted
+  generators of the previous round.
+  \item \emph{Secure aggregation} (Sec.~\ref{sec:publish}): one $\SecAgg$ over all $U$ classes at
+  once; a client writes zeros for classes it does not hold. $\Agg$ obtains, per class, the sum of the
+  updates and the number of contributors, and averages.
+  \item \emph{Global classifier} (Sec.~\ref{sec:full}): $\Agg$ trains $F$ on images of all averaged
+  generators.
+  \item \emph{Distribution}: $\Agg$ posts each generator sealed under $pk_g$ on $\BB$; each client
+  opens those of its own indices with $\mathrm{sk}_i$.
+\end{enumerate}
+Rounds repeat until $F$ converges.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth,page=2,trim=8 68 106 8,clip]{figs/protocol_steps.pdf}
+  \caption{Online phase, every round: (1)~local training; (2)~one SecAgg of all updates;
+  (3)~averaging, classifier training, and sealed generators posted; (4)~clients open their own.}
+  \label{fig:round}
+\end{figure}
+
+\subsubsection{Local Training}
+\label{sec:rounds}
+Client $C_i$ holds the generators of its classes $\mathcal{G}_i=\mathrm{idx}_i(\mathcal{Y}_i)$ and
+trains them for $E_\ell$ epochs per round against its own conditional discriminator $D_i$. Each step
+uses $b$ images of every own class, so every generator sees a full batch of its class. The generator
+loss is the GAN loss plus $\lambda\,\mathrm{CE}\big(f_i(G_{\theta_g}(z)),y\big)$, so generators draw
+images that $f_i$ recognizes as their label. Neither $D_i$ nor $f_i$ is ever sent. The common
+$\theta^{(0)}$ lets warmed-up generators keep their weights under the new indices. A round's
+training ends with the update $\Delta_{i,g}=\theta'_{i,g}-\hat\theta_g$ for every
+$g\in\mathcal{G}_i$.
+
+\subsubsection{Secure Update Publication}
+\label{sec:publish}
+Every client uploads one fixed-length vector over all $U$ classes, with zeros where it holds none,
+so its upload reveals nothing about its labels. On a public per-round subset $\mathcal{S}_r$ of
+$\rho P$ coordinates, each update is clipped by public per-tensor scales $\gamma_g$ and
+stochastically rounded to 8 bits ($Q$), with a holder indicator $\mathbb{1}_{i,g}$ and the clip
+rates; sums of $n\le258$ clients fit in $\mathbb{Z}_{2^{16}}$.
+\begin{itemize}
+  \item \emph{Input:} $\mathbf{u}_i=\big(Q(\Delta_{i,g}[\mathcal{S}_r]/\gamma_g),\mathbb{1}_{i,g}\big)_{g\in[U]}$, $i\in[n]$.
+  \emph{Output to $\Agg$:} $\mathbf{S}\gets\SecAgg_{16}(\{\mathbf{u}_i\})$.
+\end{itemize}
+The first upload after warm-up carries the whole warm-up and is sent once uncompressed with
+$\SecAgg_{64}$ in fixed point. From $\mathbf{S}$, $\Agg$ obtains for every class the sum of its
+holders' updates and their number $n_g$, updates $\theta_g$ by the mean if $n_g\ge t_h$, and adapts
+$\gamma_g$ to the summed clip rates. Averaging needs $n_g$, so $\Agg$ learns the number of
+contributors per class and round, but not who they are; the offline phase hides even this number.
+$\Agg$ then posts every $\theta_g$ sealed to $pk_g$ (DHKEM on ristretto255 with AES-GCM, as in
+HPKE~\cite{rfc9180}; associated data $(r,g)$; payload: the 8-bit change since the last round). Every
+client downloads all $U$ equal-size ciphertexts and opens only its own, so its access pattern
+reveals no labels.
+
+\subsubsection{Global Classifier}
+\label{sec:full}
+After every round $\Agg$, which holds all averaged generators but no real data, trains $F$ for $E_s$
+epochs on synthetic pairs $(G_{\theta_g}(z),g)$, $z\sim\mathcal{N}(0,I)$, with $b_s$ fresh samples
+per class and $g\in[U]$. $F$ thus covers the union of all clients' classes although no client holds
+them all. $F$ is the output of training, and $\Agg$ knows its classes only by index; a client maps
+$F$'s outputs back to its own labels through $\mathrm{idx}_i$.
+
+\begin{algorithm}[t]
+\caption{Online phase: training round $r=1,\dots,R$ (Fig.~\ref{fig:round})}
+\label{alg:round}
+\begin{algorithmic}[1]
+\Require $C_i$: $\mathrm{idx}_i$, $\mathrm{sk}_i$, $\{\hat\theta_g\}_{g\in\mathcal{G}_i}$, $D_i$, $f_i$; $\Agg$: $\{\theta_g\}_{g\in[U]}$, $\gamma_g$; $\BB$: $pk_0,\dots,pk_{U-1}$
+\Statex \textit{Local training (Sec.~\ref{sec:rounds})}
+\State each $C_i$: train $\{G_{\hat\theta_g}\}_{g\in\mathcal{G}_i}$ vs.\ $D_i$ (guided by $f_i$) for $E_\ell$ epochs; $\Delta_{i,g}\gets\theta'_{i,g}-\hat\theta_g$
+\Statex \textit{Secure update publication (Sec.~\ref{sec:publish})}
+\State $\mathcal{S}_r\subseteq[P]$, $|\mathcal{S}_r|=\rho P$, derived from $H(r)$ \Comment{public}
+\State each $C_i$: $\mathbf{u}_i\gets\big(Q(\Delta_{i,g}[\mathcal{S}_r]/\gamma_g),\ \mathbb{1}_{i,g}\big)_{g\in[U]}$ \Comment{zeros if $g\notin\mathcal{G}_i$}
+\State $\Agg$: $\mathbf{S}\gets\SecAgg_{16}(\{\mathbf{u}_i\})$;\ \ $n_g\gets\sum_i\mathbb{1}_{i,g}$
+\For{$g\in[U]$ with $n_g\ge t_h$}
+  \State $\theta_g[\mathcal{S}_r]\gets\theta_g[\mathcal{S}_r]+\frac{\gamma_g}{127\,n_g}\mathbf{S}_g$ \Comment{mean over holders}
+\EndFor
+\Statex \textit{Global classifier (Sec.~\ref{sec:full})}
+\State $\Agg$: train $F$ for $E_s$ epochs on $\{(G_{\theta_g}(z),g)\}$, $b_s$ samples per $g\in[U]$
+\Statex \textit{Distribution}
+\State $\Agg$: adapt $\gamma_g$; post $\mathsf{ct}_g\gets\Seal\big(pk_g,(r,g),\theta_g\big)$ on $\BB$, $g\in[U]$
+\State each $C_i$: download all $\mathsf{ct}_g$; $\hat\theta_g\gets\Open\big(\mathrm{sk}_i(y),(r,g),\mathsf{ct}_g\big)$ for $g=\mathrm{idx}_i(y)$, $y\in\mathcal{Y}_i$
+\end{algorithmic}
+\end{algorithm}

@@ -78,7 +78,7 @@ label, and $\Agg$ only $U$ and one public key per index. Only the grouping runs 
 steps are SecAgg with $\Agg$.
 
 \emph{Step 1: circuit PSI.} Each label becomes a row $(v_a,\phi_a,\mathbf{s}_a)$
-(Alg.~\ref{alg:rows}): a valid bit; a keyword feature (hashed name, single-letter symbol, or
+(Alg.~\ref{alg:rows}): a valid bit; a keyword feature (hashed name or
 fixed-point embedding $\mathbf{e}_a$ with hub term $r_a$); and the indicator
 $\mathbf{s}_a\in\{0,1\}^{N_I}$ of the $k$ image anchors nearest to the label's mean signature.
 Dummy rows pad to $m$. Rows are Shamir-shared~\cite{shamir1979share} with degree
@@ -89,7 +89,7 @@ honest-majority protocol~\cite{damgard2007scalable}. For each pair of rows of di
   \mathrm{KW}(\phi_a,\phi_{a'}),
   \label{eq:match}
 \end{equation}
-where $\mathrm{KW}$ is equality for names and symbols, and for embeddings the CSLS
+where $\mathrm{KW}$ is equality for names, and for embeddings the CSLS
 test~\cite{conneau2018word} $2\langle\mathbf{e}_a,\mathbf{e}_{a'}\rangle-r_a-r_{a'}\ge\tau$, which
 discounts hub words. Matching is not transitive, so $\Fgrp$ takes connected components by min-label
 propagation, carrying a joint random secret per row, and opens to each owner only the secret $K$ of
@@ -121,8 +121,6 @@ hides the count.
   \State $w\gets\mathrm{Norm}(w_i(y_a))$ \Comment{NFKC, numerals spelled out}
   \If{mode $=$ exact}
     \State $\phi_a\gets(\textsf{name},\,H_{\mathrm{n}}(w))$
-  \ElsIf{$w$ is a single Latin letter}
-    \State $\phi_a\gets(\textsf{sym},\,w)$ \Comment{case kept}
   \Else
     \State $\mathbf{e}\gets E(w)$;\ \ $r\gets\frac1h\sum_{j\in\mathrm{top}_h}\langle\mathbf{e},\boldsymbol{\epsilon}_j\rangle$
     \State $\phi_a\gets(\textsf{emb},\,\lfloor2^{f}\mathbf{e}\rceil,\,\lfloor2^{2f}r\rceil)$ \Comment{fixed point}

@@ -268,7 +268,10 @@ def circuit_union(names, dictionary, ids, keywords=None, workers=1, samples=None
                 image_match=f'{image[1]}-of-{image[0]}' if sets else 'off')
     metrics = index_metrics(names, index, U, dictionary)
     say(f"[setup] circuit-PSI union done in {info['seconds']:.1f}s: {U} labels; exact={metrics['exact']}"
-        + (f"; MPC (estimated) {info['mpc']['mults'] / 1e6:.1f}M mults, "
+        + (f"; MPC (MP-SPDZ, measured) {info['mpc']['measured']['time_seconds']:.1f}s, "
+           f"{info['mpc']['measured']['party0_MB']:.0f} MB sent by party 0"
+           if info.get('mpc', {}).get('measured') else
+           f"; MPC (estimated) {info['mpc']['mults'] / 1e6:.1f}M mults, "
            f"{info['mpc']['bytes_per_client'] / 1e6:.0f} MB/client" if 'mpc' in info else ''))
     return dict(index=index, sks=sks, pks=pks, U=U, metrics=metrics, view=_view(names, index, ids, U), info=info)
 

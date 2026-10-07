@@ -51,7 +51,7 @@ GEN=${GEN:-perlabel}               # perlabel (default): one whole DCGAN per lab
 DATA=${DATA:---num-train-mnist 1 --num-train-emnist 1 --num-train-cifar10 1 --min-holders 1}
 PHASES=${PHASES:-1 2 3 4}
 # MPC=1 (default): circuit-PSI grouping as a real MPC in MP-SPDZ, downloaded once to third_party/ by
-# get_mpspdz.sh; measured cost in the union stats. MPC=0, or no x86-64 Linux: ideal functionality + estimate.
+# get_mpspdz.sh; measured cost in setup.json. MPC=0, or no x86-64 Linux: ideal functionality + estimate.
 if [[ ${MPC:-1} == 1 && -z ${MPSPDZ:-} ]]; then
     if MPSPDZ=$(bash get_mpspdz.sh); then export MPSPDZ; else echo "MP-SPDZ unavailable: grouping runs as its ideal functionality" >&2; fi
 fi
