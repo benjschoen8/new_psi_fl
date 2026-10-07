@@ -11,6 +11,7 @@
 #                                                             # default: one whole generator per label
 #   DEVICE=cuda WORKERS=8 ABLATIONS=1 bash run_experiments.sh
 #   tmux new -s exp 'bash run_experiments.sh'                 # keeps running after you disconnect
+#   SEQ=1 bash run_experiments.sh                             # phase 1/3 runs one at a time (low GPU memory)
 #
 # Output: <OUT>_<YYYYMMDD-HHMM>/ per start (link: latest). With RESUME=<folder> a finished run (DONE file)
 # is skipped and an unfinished one resumes from its
@@ -56,6 +57,7 @@ if [[ ${MPC:-1} == 1 && -z ${MPSPDZ:-} ]]; then
     if MPSPDZ=$(bash get_mpspdz.sh); then export MPSPDZ; else echo "MP-SPDZ unavailable: grouping runs as its ideal functionality" >&2; fi
 fi
 read -r -a GPU_LIST <<< "${GPUS:-}"
+SEQ=${SEQ:-0}                       # 1: runs of phases 1 and 3 one at a time instead of in parallel
 MONITOR=${MONITOR:-auto}
 REFRESH=${REFRESH:-30}
 
@@ -107,6 +109,11 @@ run() {  # run <name> <rounds> <workers> [cli flags...]
 }
 
 group() {  # run several runs at once: group "<run args>" "<run args>" ...; GPUs round-robin
+    if [[ $SEQ == 1 ]]; then                               # SEQ=1: one after another, first GPU
+        local rc=0 spec
+        for spec in "$@"; do RUN_GPU=${GPU_LIST[0]:-} eval "run $spec" || rc=1; done
+        return $rc
+    fi
     local pids=() i=0 prev='' prevpid=''
     for spec in "$@"; do
         local n=${#GPU_LIST[@]} g=''
@@ -129,7 +136,7 @@ fails=0
 has() { [[ " $PHASES " == *" $1 "* ]]; }
 RUN_GPU=${GPU_LIST[0]:-}                                   # single runs: first GPU
 if has 1; then
-say "phase 1: accuracy ($ROUNDS rounds, plain + ours + ours_fuzzy in parallel)"
+say "phase 1: accuracy ($ROUNDS rounds, plain + ours + ours_fuzzy $([[ $SEQ == 1 ]] && echo "one at a time" || echo "in parallel"))"
 # GPUS="0 1" puts plain + ours_fuzzy on GPU 0, ours on GPU 1
 group "plain $ROUNDS $WORKERS --agg plain" "ours $ROUNDS $WORKERS" "ours_fuzzy $ROUNDS $WORKERS --union fuzzy" || fails=1
 fi
