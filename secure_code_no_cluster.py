@@ -557,7 +557,9 @@ def main():
         from tqdm.auto import tqdm
         um = row.get('union_metrics')
         per = row['bytes'].get('upload_per_client', row['bytes']['upload'])
+        by = row.get('evaluation', {}).get('by_dataset', {})
         tqdm.write(f"Round {row['round']}: acc={row['accuracy']:.4f} old_acc={row['old_acc']:.4f} "
+                   + ''.join(f"{k}={v['accuracy']:.4f} " for k, v in by.items())
                    + (f"union exact={um['exact']} " if um else '')
                    + f"upload/client={per / 1e3:.1f}kB ({sum(row['seconds'].values()):.1f}s)")
     devices = [resolve_device(d) for d in args.devices.split(',')] if args.devices else [args.device]

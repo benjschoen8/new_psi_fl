@@ -198,6 +198,11 @@ for d in sorted(p for p in out.iterdir() if (p / 'metrics.jsonl').exists()):
     sec = sum(sum(r['seconds'].values()) for r in rows) / len(rows)
     print(f"{d.name:<16}{rows[-1]['round']:>7}{rows[-1]['accuracy']:>11.4f}{max(r['accuracy'] for r in rows):>10.4f}"
           f"{up / 1e3:>12.1f} kB{sec:>9.0f}")
+    tail = [r for r in rows[-10:] if 'by_dataset' in r.get('evaluation', {})]   # per test set, last 10 rounds
+    if tail:
+        names = tail[-1]['evaluation']['by_dataset']
+        print(' ' * 16 + '  '.join(f"{k} {sum(r['evaluation']['by_dataset'][k]['accuracy'] for r in tail) / len(tail):.4f}"
+                                   for k in names) + f"  (mean of last {len(tail)} rounds)")
 EOF
 
 fi
