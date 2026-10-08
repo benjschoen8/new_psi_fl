@@ -29,16 +29,35 @@ class SetupSmokeTests(unittest.TestCase):
                 (root / 'shamir-party.x').touch(mode=0o755)
                 return subprocess.CompletedProcess(args, 0, str(root) + '\n')
             with patch.dict(os.environ, {'MPSPDZ': str(root / 'missing')}):
-                with patch('setup_smoke.subprocess.run', side_effect=install) as run:
+                with patch('setup_smoke.platform.system', return_value='Linux'), patch('setup_smoke.platform.machine', return_value='x86_64'), patch('setup_smoke.subprocess.run', side_effect=install) as run:
                     self.assertEqual(setup_smoke.ensure_mpspdz(), root.resolve())
                     self.assertEqual(os.environ['MPSPDZ'], str(root.resolve()))
                     self.assertEqual(Path(run.call_args.args[0][1]).name, 'get_mpspdz.sh')
 
     def test_install_failure_does_not_fall_back(self):
         with patch.dict(os.environ, {'MPSPDZ': '/missing/mp-spdz'}):
-            with patch('setup_smoke.subprocess.run', side_effect=subprocess.CalledProcessError(1, 'installer')):
+            with patch('setup_smoke.platform.system', return_value='Linux'), patch('setup_smoke.platform.machine', return_value='x86_64'), patch('setup_smoke.subprocess.run', side_effect=subprocess.CalledProcessError(1, 'installer')):
                 with self.assertRaisesRegex(RuntimeError, 'MP-SPDZ'):
                     setup_smoke.ensure_mpspdz()
+
+    def test_gx10_selects_source_build(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / 'compile.py').touch()
+            (root / 'shamir-party.x').touch(mode=0o755)
+            with patch.dict(os.environ, {'MPSPDZ': ''}), patch('setup_smoke.platform.system', return_value='Linux'), patch('setup_smoke.platform.machine', return_value='aarch64'), patch('setup_smoke.build_mpspdz_from_source', return_value=root) as build, patch('setup_smoke.subprocess.run') as binary:
+                self.assertEqual(setup_smoke.ensure_mpspdz(), root)
+                build.assert_called_once()
+                binary.assert_not_called()
+
+    def test_cached_source_build_initializes_ssl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / 'compile.py').touch()
+            (root / 'shamir-party.x').touch(mode=0o755)
+            with patch.dict(os.environ, {'MPSPDZ_BUILD_DIR': directory}), patch('setup_smoke.subprocess.run') as run:
+                self.assertEqual(setup_smoke.build_mpspdz_from_source(), root)
+                self.assertEqual(run.call_args.args[0], ['bash', 'Scripts/setup-ssl.sh', '16'])
 
     def test_setup_only_cli(self):
         with tempfile.TemporaryDirectory() as directory:

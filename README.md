@@ -169,7 +169,11 @@ upload/download bytes per client and in total, and any measured MP-SPDZ compilat
 execution time, and global MB. `setup.json` also records configuration, metric limitations,
 and underlying protocol statistics. Reusing an output directory overwrites these two files.
 Secure runs check `MPSPDZ`, then reuse/download MP-SPDZ through `get_mpspdz.sh` if needed
-(automatic binary installation supports x86-64 Linux). Installation time is excluded from
+(x86-64 Linux uses binaries; ARM64 Linux/GX10 builds from source into `~/.cache/mp-spdz`).
+On Ubuntu, missing build dependencies are installed using apt-get; sudo may request your password.
+The initial source build can take 10–30+ minutes, and later runs reuse it.
+`MPSPDZ_JOBS` controls build parallelism (default 4); `MPSPDZ_BUILD_DIR` overrides the cache directory.
+Installation time is excluded from
 benchmark timings. Installation failures stop the benchmark; there is no silent simulation
 fallback. To explicitly run ideal grouping without installing MPC, pass `--simulate`;
 its wall time is **not real MPC time**. Plain-only runs do not require MP-SPDZ.

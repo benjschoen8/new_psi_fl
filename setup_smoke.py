@@ -40,24 +40,39 @@ def build_mpspdz_from_source():
     """Clone and compile MP-SPDZ locally (needed on ARM, where no binary release exists)."""
     root = Path(os.environ.get('MPSPDZ_BUILD_DIR',
                                Path.home() / '.cache' / 'mp-spdz')).expanduser().resolve()
-    if _valid_mpspdz(root):
-        return root
-    for tool in ('git', 'make', 'g++'):
-        if shutil.which(tool) is None and not (tool == 'g++' and shutil.which('clang++')):
-            raise RuntimeError(f'Building MP-SPDZ needs {tool}. Install the build dependencies first '
-                               '(see the README of MP-SPDZ).')
-    ref = os.environ.get('MPSPDZ_REF')  # optionally pin a tag/branch, e.g. v0.4.0
     try:
-        if not (root / '.git').is_dir():
-            root.parent.mkdir(parents=True, exist_ok=True)
-            cmd = ['git', 'clone', '--depth', '1']
-            if ref:
-                cmd += ['--branch', ref]
-            subprocess.run(cmd + [MPSPDZ_REPO, str(root)], check=True, stdout=sys.stderr)
-        jobs = str(os.cpu_count() or 2)
-        print('Compiling MP-SPDZ from source (this can take 10-30+ minutes)...', file=sys.stderr)
-        subprocess.run(['make', 'setup'], cwd=root, check=True, stdout=sys.stderr)
-        subprocess.run(['make', '-j', jobs, 'shamir-party.x'], cwd=root, check=True, stdout=sys.stderr)
+        if not _valid_mpspdz(root):
+            if platform.system() == 'Linux' and shutil.which('apt-get') and shutil.which('dpkg-query'):
+                packages = ('automake build-essential clang cmake git libboost-dev libboost-filesystem-dev '
+                            'libboost-iostreams-dev libboost-thread-dev libgmp-dev libntl-dev libsodium-dev '
+                            'libssl-dev libtool python3 ca-certificates openssl').split()
+                missing = []
+                for package in packages:
+                    status = subprocess.run(['dpkg-query', '-W', '-f=${Status}', package],
+                                            capture_output=True, text=True)
+                    if status.returncode or status.stdout.strip() != 'install ok installed':
+                        missing.append(package)
+                if missing:
+                    sudo = [] if os.geteuid() == 0 else ['sudo']
+                    print('Installing build dependencies; sudo may ask for your password.', file=sys.stderr)
+                    subprocess.run(sudo + ['apt-get', 'update'], check=True, stdout=sys.stderr)
+                    subprocess.run(sudo + ['apt-get', 'install', '-y', *missing], check=True, stdout=sys.stderr)
+            for tool in ('git', 'make', 'clang++', 'cmake', 'python3', 'openssl'):
+                if shutil.which(tool) is None:
+                    raise RuntimeError(f'Building MP-SPDZ needs {tool}. Install its build dependencies first.')
+            ref = os.environ.get('MPSPDZ_REF', 'v0.4.2')
+            if not (root / '.git').is_dir():
+                root.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run(['git', 'clone', '--depth', '1', '--branch', ref, MPSPDZ_REPO, str(root)],
+                               check=True, stdout=sys.stderr)
+            jobs = os.environ.get('MPSPDZ_JOBS', '4')
+            print('Compiling native MP-SPDZ (first build can take 10-30+ minutes)...', file=sys.stderr)
+            subprocess.run(['make', 'setup'], cwd=root, check=True, stdout=sys.stderr)
+            subprocess.run(['make', '-j', jobs, 'shamir-party.x'], cwd=root, check=True, stdout=sys.stderr)
+        # Native source builds need the same certificates as binary installations.
+        # Retry this stage after an interrupted build/setup, even if the binary exists.
+        if not (root / 'Player-Data' / 'P15.pem').is_file():
+            subprocess.run(['bash', 'Scripts/setup-ssl.sh', '16'], cwd=root, check=True, stdout=sys.stderr)
     except (OSError, subprocess.CalledProcessError) as error:
         raise RuntimeError('Building MP-SPDZ from source failed (see output above). Install its '
                            'dependencies, or set MPSPDZ to a working installation, or use --simulate.') from error
