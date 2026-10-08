@@ -7,12 +7,18 @@
 Setup means image signatures/anchors, label grouping, bucket union, and public-key
 distribution. Model initialization, data loading, training, and evaluation are excluded.
 Fuzzy uses the existing text encoder (cache or optional sentence-transformers).
+
+On x86-64 Linux a prebuilt MP-SPDZ binary is downloaded. On other platforms (ARM,
+macOS, ...) MP-SPDZ is cloned and compiled from source into ~/.cache/mp-spdz
+(override with MPSPDZ_BUILD_DIR; pin a tag/branch with MPSPDZ_REF).
 """
 import argparse
 import csv
 import json
 import os
 from pathlib import Path
+import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -22,30 +28,68 @@ import numpy as np
 from label_union.circuit_union import circuit_union_with_keys
 from label_union.domain import anchor_matrix, client_sets
 
+MPSPDZ_REPO = 'https://github.com/data61/MP-SPDZ.git'
+
+
+def _valid_mpspdz(root):
+    return ((root / 'compile.py').is_file() and (root / 'shamir-party.x').is_file()
+            and os.access(root / 'shamir-party.x', os.X_OK))
+
+
+def build_mpspdz_from_source():
+    """Clone and compile MP-SPDZ locally (needed on ARM, where no binary release exists)."""
+    root = Path(os.environ.get('MPSPDZ_BUILD_DIR',
+                               Path.home() / '.cache' / 'mp-spdz')).expanduser().resolve()
+    if _valid_mpspdz(root):
+        return root
+    for tool in ('git', 'make', 'g++'):
+        if shutil.which(tool) is None and not (tool == 'g++' and shutil.which('clang++')):
+            raise RuntimeError(f'Building MP-SPDZ needs {tool}. Install the build dependencies first '
+                               '(see the README of MP-SPDZ).')
+    ref = os.environ.get('MPSPDZ_REF')  # optionally pin a tag/branch, e.g. v0.4.0
+    try:
+        if not (root / '.git').is_dir():
+            root.parent.mkdir(parents=True, exist_ok=True)
+            cmd = ['git', 'clone', '--depth', '1']
+            if ref:
+                cmd += ['--branch', ref]
+            subprocess.run(cmd + [MPSPDZ_REPO, str(root)], check=True, stdout=sys.stderr)
+        jobs = str(os.cpu_count() or 2)
+        print('Compiling MP-SPDZ from source (this can take 10-30+ minutes)...', file=sys.stderr)
+        subprocess.run(['make', 'setup'], cwd=root, check=True, stdout=sys.stderr)
+        subprocess.run(['make', '-j', jobs, 'shamir-party.x'], cwd=root, check=True, stdout=sys.stderr)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError('Building MP-SPDZ from source failed (see output above). Install its '
+                           'dependencies, or set MPSPDZ to a working installation, or use --simulate.') from error
+    return root
+
 
 def ensure_mpspdz():
-    """Reuse a valid configured install, or acquire the repo's Linux binary release."""
-    def valid(root):
-        return (root / 'compile.py').is_file() and (root / 'shamir-party.x').is_file() and os.access(root / 'shamir-party.x', os.X_OK)
-
+    """Reuse a valid configured install; otherwise use the Linux binary (x86-64) or build from source (ARM etc.)."""
     configured = os.environ.get('MPSPDZ')
     if configured:
         root = Path(configured).expanduser().resolve()
-        if valid(root):
+        if _valid_mpspdz(root):
             os.environ['MPSPDZ'] = str(root)
             return root
-        print(f'MPSPDZ={configured} is incomplete; checking the bundled installer.', file=sys.stderr)
-    installer = Path(__file__).resolve().with_name('get_mpspdz.sh')
-    try:
-        result = subprocess.run(['bash', str(installer)], stdout=subprocess.PIPE, text=True, check=True)
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise RuntimeError('MP-SPDZ installation failed (see installer output above). The automatic '
-                           'binary installer requires x86-64 Linux. Set MPSPDZ to a working installation '
-                           'or explicitly use --simulate.') from error
-    path = result.stdout.strip()
-    root = Path(path).expanduser().resolve()
-    if not path or not valid(root):
-        raise RuntimeError('MP-SPDZ installer did not return a directory containing compile.py and executable shamir-party.x')
+        print(f'MPSPDZ={configured} is incomplete; trying to install.', file=sys.stderr)
+
+    machine = platform.machine().lower()
+    if platform.system() == 'Linux' and machine in {'x86_64', 'amd64'}:
+        installer = Path(__file__).resolve().with_name('get_mpspdz.sh')
+        try:
+            result = subprocess.run(['bash', str(installer)], stdout=subprocess.PIPE, text=True, check=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise RuntimeError('MP-SPDZ binary installation failed (see installer output above). '
+                               'Set MPSPDZ to a working installation or use --simulate.') from error
+        root = Path(result.stdout.strip()).expanduser().resolve()
+    else:
+        print(f'No prebuilt MP-SPDZ for {platform.system()}/{machine}; building from source.', file=sys.stderr)
+        root = build_mpspdz_from_source()
+
+    if not _valid_mpspdz(root):
+        raise RuntimeError('MP-SPDZ install did not produce a directory containing compile.py '
+                           'and executable shamir-party.x')
     os.environ['MPSPDZ'] = str(root)
     return root
 
@@ -129,7 +173,7 @@ def main(argv=None):
 
     notes = [
         'Synthetic setup only; excludes fixture generation, imports, model initialization, training, and evaluation.',
-        'MP-SPDZ installation/download time is excluded from setup timings.',
+        'MP-SPDZ installation/download/compile time is excluded from setup timings.',
         'Wall time is a single-host simulation, not network communication latency. No isolated communication timer exists.',
         'Byte totals use the existing protocol accounting plus MPC estimates, even when MP-SPDZ is enabled.',
         'mpc_measured reports actual MP-SPDZ grouping traffic/time separately; setup wall time includes its compilation.',
