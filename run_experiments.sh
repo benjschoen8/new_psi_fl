@@ -57,7 +57,8 @@ if [[ ${MPC:-1} == 1 && -z ${MPSPDZ:-} ]]; then
     if MPSPDZ=$(bash get_mpspdz.sh); then export MPSPDZ; else echo "MP-SPDZ unavailable: grouping runs as its ideal functionality" >&2; fi
 fi
 read -r -a GPU_LIST <<< "${GPUS:-}"
-SEQ=${SEQ:-0}                       # 1: runs of phases 1 and 3 one at a time instead of in parallel
+SEQ=${SEQ:-0}                       # 1: runs of phases 1 and 3 one at a time, each on all GPUS (clients
+                                    # round-robin; use WORKERS >= number of clients to train them in parallel)
 MONITOR=${MONITOR:-auto}
 REFRESH=${REFRESH:-30}
 
@@ -92,9 +93,10 @@ run() {  # run <name> <rounds> <workers> [cli flags...]
         # shellcheck disable=SC2086
         local gpu=()
         [[ -n ${RUN_GPU:-} ]] && gpu=(env "CUDA_VISIBLE_DEVICES=$RUN_GPU")
-        local warm=()
+        local warm=() devs=()
         (( WARMUP > 0 )) && warm=(--warmup-epochs "$WARMUP")
-        if "${gpu[@]}" $PY -m secure_code_no_cluster $DATA "$@" "${warm[@]}" $EXTRA --rounds "$rounds" --device "$DEVICE" --workers "$workers" \
+        [[ -n ${RUN_DEVICES:-} ]] && devs=(--devices "$RUN_DEVICES")
+        if "${gpu[@]}" $PY -m secure_code_no_cluster $DATA "$@" "${warm[@]}" $EXTRA --rounds "$rounds" --device "$DEVICE" "${devs[@]}" --workers "$workers" \
                --no-progress --output "$dir" "${resume[@]}" >> "$log" 2>&1; then
             touch "$dir/DONE"
             say "done  $name in $(( (SECONDS - t0) / 60 )) min"
@@ -109,9 +111,12 @@ run() {  # run <name> <rounds> <workers> [cli flags...]
 }
 
 group() {  # run several runs at once: group "<run args>" "<run args>" ...; GPUs round-robin
-    if [[ $SEQ == 1 ]]; then                               # SEQ=1: one after another, first GPU
+    if [[ $SEQ == 1 ]]; then                               # SEQ=1: one after another, all GPUs each
         local rc=0 spec
-        for spec in "$@"; do RUN_GPU=${GPU_LIST[0]:-} eval "run $spec" || rc=1; done
+        local all devs=''                                  # each run gets every GPU in GPUS: clients are
+        all=$(IFS=,; echo "${GPU_LIST[*]}")                # spread over them round-robin (--devices)
+        (( ${#GPU_LIST[@]} > 1 )) && devs=$(seq -s, -f 'cuda:%g' 0 $(( ${#GPU_LIST[@]} - 1 )))
+        for spec in "$@"; do RUN_GPU=$all RUN_DEVICES=$devs eval "run $spec" || rc=1; done
         return $rc
     fi
     local pids=() i=0 prev='' prevpid=''

@@ -148,6 +148,36 @@ python -m main --mapping by_class \
 
 ## 驗證界線
 
+### Setup-only smoke benchmark (no training)
+
+```bash
+python -m setup_smoke --out setup_results
+python -m setup_smoke --clients 3 5 --labels 3 10 --repeats 3 --bucket-bits 20 --out setup_results_full
+# Optional: select an existing MP-SPDZ installation and include fuzzy matching
+MPSPDZ=/path/to/mp-spdz python -m setup_smoke --methods plain exact fuzzy --out setup_results_mpc
+```
+
+This independent script runs synthetic image signatures/anchors, label grouping, bucket union,
+and public-key distribution directly. It performs no generator/classifier initialization,
+warm-up, training, or evaluation. The default comparison is plain versus secure exact circuit
+setup, with 3 clients, 3 labels per client, and 16 bucket bits; use 20 bits for the production
+bucket-vector size. Compression does not affect setup, so compressed/uncompressed runs are
+not duplicated. Optional fuzzy matching uses the existing encoder cache or sentence-transformers.
+
+`setup.csv` contains one row per trial with setup/image/union wall times, union size, estimated
+upload/download bytes per client and in total, and any measured MP-SPDZ compilation time,
+execution time, and global MB. `setup.json` also records configuration, metric limitations,
+and underlying protocol statistics. Reusing an output directory overwrites these two files.
+Secure runs check `MPSPDZ`, then reuse/download MP-SPDZ through `get_mpspdz.sh` if needed
+(automatic binary installation supports x86-64 Linux). Installation time is excluded from
+benchmark timings. Installation failures stop the benchmark; there is no silent simulation
+fallback. To explicitly run ideal grouping without installing MPC, pass `--simulate`;
+its wall time is **not real MPC time**. Plain-only runs do not require MP-SPDZ.
+Byte totals retain the protocol's existing estimates; measured MP-SPDZ traffic is reported
+separately. Plain label transport is uninstrumented, hence its reported zero bytes is not a
+complete network cost. There is no isolated network-latency measurement. Synthetic smoke
+results check the setup pipeline, rather than replace full research benchmarks.
+
 測試包含：CPU 真實梯度更新、原版 DCGAN 本地訓練權重對照、PACFL、雙向 mapping 的成功與失敗 cycle、oracle permutation、錯誤合併評測、未抽樣群保留、tensor snapshot 不共用儲存、mapping 隨機性隔離與 server 職責檢查。
 
 合成 smoke 僅驗證管線與輸出；不代表研究精準度。尚未執行完整真實資料集 / GPU 實驗。
