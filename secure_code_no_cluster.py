@@ -38,6 +38,7 @@ from secure_main import aggregate
 from evaluation import evaluate_global
 from mapping import ByClassMapping
 from training import GlobalClassifierTrainer
+from setup import label_samples
 
 PUBLIC_SEED = 20260925
 
@@ -89,19 +90,6 @@ def union_relations(ids, names, class_of, keys=None):
     keys = keys or names
     predicted = {cid: {a: class_of[x] for a, x in enumerate(k)} for cid, k in zip(ids, keys)}
     return predicted, ByClassMapping(dict(zip(ids, names)))()
-
-
-def label_samples(loader, names, k):
-    """Up to k training images per local label (for the domain check), read in dataset order."""
-    from torch.utils.data import DataLoader
-    got = {}
-    for x, y in DataLoader(loader.dataset, batch_size=256, shuffle=False):
-        for xi, yi in zip(x, y.tolist()):
-            if len(got.setdefault(yi, [])) < k:
-                got[yi].append(xi.numpy())
-        if len(got) == len(names) and all(len(v) >= k for v in got.values()):
-            break
-    return {names[a]: np.stack(v) for a, v in got.items()}
 
 
 def build_union(names, dictionary, ids, method='mpc', workers=1, say=lambda *_: None, samples=None):

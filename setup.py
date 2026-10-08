@@ -29,6 +29,20 @@ def label_names(dataset, dataset_name):
     return tuple(str(name) for name in dataset.classes)
 
 
+def label_samples(loader, names, k):
+    """Up to k training images per local label, in dataset order, for union setup."""
+    import numpy as np
+    from torch.utils.data import DataLoader
+    got = {}
+    for x, y in DataLoader(loader.dataset, batch_size=256, shuffle=False):
+        for xi, yi in zip(x, y.tolist()):
+            if len(got.setdefault(yi, [])) < k:
+                got[yi].append(xi.numpy())
+        if len(got) == len(names) and all(len(v) >= k for v in got.values()):
+            break
+    return {names[a]: np.stack(v) for a, v in got.items()}
+
+
 def resolve_device(name='auto'):
     """'auto' picks CUDA if present, then Apple MPS, then CPU; anything else is used as given."""
     import torch

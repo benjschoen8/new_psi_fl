@@ -152,23 +152,40 @@ python -m main --mapping by_class \
 
 ```bash
 python -m setup_smoke --out setup_results
-python -m setup_smoke --clients 3 5 --labels 3 10 --repeats 3 --bucket-bits 20 --out setup_results_full
+python -m setup_smoke --data-root data/raw --repeats 3 --out setup_results_real
+# Small synthetic check, with no dataset or MPC download:
+python -m setup_smoke --data synthetic --simulate --clients 3 --labels 3 --out setup_results_synthetic
 # Optional: select an existing MP-SPDZ installation and include fuzzy matching
 MPSPDZ=/path/to/mp-spdz python -m setup_smoke --methods plain exact fuzzy --out setup_results_mpc
 ```
 
-This independent script runs synthetic image signatures/anchors, label grouping, bucket union,
-and public-key distribution directly. It performs no generator/classifier initialization,
-warm-up, training, or evaluation. The default comparison is plain versus secure exact circuit
-setup, with 3 clients, 3 labels per client, and 16 bucket bits; use 20 bits for the production
-bucket-vector size. Compression does not affect setup, so compressed/uncompressed runs are
-not duplicated. Optional fuzzy matching uses the existing encoder cache or sentence-transformers.
+By default this uses real MNIST, EMNIST **byclass**, and CIFAR-10, directly reusing
+`fl_datasets.load_partitioned_datasets`, its image transforms and partitions, and the original
+`setup.label_names` / `setup.label_samples` components. The training entry point uses the same
+sampler. Existing datasets and split caches are reused; missing datasets are downloaded by
+the original loader. No generator/classifier initialization, warm-up, training, or evaluation runs.
+
+The default compares plain and secure exact circuit setup for 3, 5, 10, 30, and 50 **total**
+clients. MNIST/EMNIST/CIFAR-10 receive respectively 1/1/1, 2/2/1, 4/3/3, 10/10/10, and 17/17/16
+clients. Real label spaces come from the partitions; `labels_per_client` reports the maximum
+(MPC padding size), with minimum/mean also recorded. Up to 16 images per label are sampled.
+The original fallback for declared labels without samples is retained. Use `--exp-conf`,
+`--seed`, `--noniid-partition`, `--class-subsets`, and `--class-share` to match a training run.
+Real data defaults to 20 bucket bits; optional `--data synthetic` defaults to 16 bits and
+supports `--labels` (3 by default). Compression does not affect setup, so it is not duplicated.
+Fuzzy matching reuses `rt_descriptions.keyword` and `--fuzzy-langs en0,en1`, plus the existing
+encoder cache or sentence-transformers.
 
 `setup.csv` contains one row per trial with setup/image/union wall times, union size, estimated
 upload/download bytes per client and in total, and any measured MP-SPDZ compilation time,
-execution time, and global MB. `setup.json` also records configuration, metric limitations,
-and underlying protocol statistics. Reusing an output directory overwrites these two files.
-Secure runs check `MPSPDZ`, then reuse/download MP-SPDZ through `get_mpspdz.sh` if needed
+execution time, and global MB. Data loading/partitioning and image sampling times are separate
+columns, excluded from setup timings; shared data preparation is done once per client-count
+configuration and reused by all methods/repeats. `setup.json` also records input metadata, configuration, metric limitations,
+and underlying protocol statistics. Each completed trial is saved immediately, with atomic
+replacement of each file, so a later failed trial leaves earlier results available.
+Reusing an output directory overwrites these two files. TLS certificates are prepared for
+the largest client count before timing starts.
+Secure runs check `MPSPDZ`, then reuse/download/build MP-SPDZ if needed
 (x86-64 Linux uses binaries; ARM64 Linux/GX10 builds from source into `~/.cache/mp-spdz`).
 On Ubuntu, missing build dependencies are installed using apt-get; sudo may request your password.
 The initial source build can take 10–30+ minutes, and later runs reuse it.
