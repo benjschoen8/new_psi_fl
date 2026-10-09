@@ -173,7 +173,7 @@ def union_quality(labels, index, U):
 UNION_ROUNDS = 3        # union/key SecAgg after the MPC: upload tags, masked keys, download result
 
 
-def setup_comm(row, mbps, rtt_ms):
+def setup_comm(row, mbps, rtt_ms, pair_workers=1):
     """Per-client setup communication: measured MP-SPDZ traffic (each party's own 'Data sent', plus what
     it receives) and rounds, plus the union/key SecAgg bytes; modelled time = bytes * 8 / bandwidth +
     rounds * RTT on the slowest client (MPC rounds summed over its sessions: an upper bound)."""
@@ -185,7 +185,28 @@ def setup_comm(row, mbps, rtt_ms):
     rounds = mpc.get('client_rounds') or [0.] * n
     total = [(s + r) * 1e6 + union_up + union_down for s, r in zip(sent, recv)]
     secs = [b * 8 / (mbps * 1e6) + (k + UNION_ROUNDS) * rtt_ms / 1e3 for b, k in zip(total, rounds)]
-    return dict(comm_MB_per_client_mean=sum(total) / n / 1e6, comm_MB_per_client_max=max(total) / 1e6,
+    # deployment estimate: each client is its own host, disjoint pairs run at once (round-robin schedule:
+    # n - 1 rounds, n odd: n), so a client's latency = rounds x one pair session (measured: the host's
+    # matching time x workers / sessions; exact with --pair-workers 1, no contention) + grouping +
+    # padding MPC + modelled network time
+    sessions = mpc.get('pair_sessions') or 0
+    pair_s = mpc.get('matching_seconds', 0) * min(pair_workers, sessions) / sessions if sessions else 0.
+    sched = (n - 1 + n % 2) if sessions else 0
+    deploy = dict(pair_workers=pair_workers, host_compute_seconds=(mpc.get('matching_seconds') or 0.)
+                  + (mpc.get('group_seconds') or 0.) + (mpc.get('pad_max_seconds') or 0.), pair_session_seconds=pair_s, deploy_pair_rounds=sched,
+                  deploy_matching_seconds=sched * pair_s, deploy_group_seconds=mpc.get('group_seconds') or 0.,
+                  deploy_pad_seconds=mpc.get('pad_max_seconds') or 0.)
+    deploy['deploy_compute_seconds'] = (deploy['deploy_matching_seconds'] + deploy['deploy_group_seconds']
+                                        + deploy['deploy_pad_seconds'])
+    deploy['deploy_seconds'] = deploy['deploy_compute_seconds'] + max(secs)
+    # network time of the slowest client when it runs c of its pair sessions at once: bandwidth-bound
+    # part unchanged, the pair sessions' round trips overlap c-fold (grouping rounds do not)
+    raw = mpc.get('client_pair_rounds') or [0.] * n
+    other = [k - r / max(1, mpc.get('pair_concurrency') or 2) for k, r in zip(rounds, raw)]   # grouping + padding
+    net = lambda c: max(b * 8 / (mbps * 1e6) + (r / c + o + UNION_ROUNDS) * rtt_ms / 1e3
+                        for b, r, o in zip(total, raw, other))
+    deploy.update(comm_seconds_sequential=net(1), comm_seconds_workers=net(max(1, min(pair_workers, n - 1))))
+    return dict(**deploy, comm_MB_per_client_mean=sum(total) / n / 1e6, comm_MB_per_client_max=max(total) / 1e6,
                 mpc_MB_per_client_mean=sum(s + r for s, r in zip(sent, recv)) / n,
                 union_MB_per_client=(union_up + union_down) / 1e6,
                 comm_rounds_per_client_max=max(rounds) + UNION_ROUNDS,
@@ -420,7 +441,7 @@ def main(argv=None):
                         row.update(data_source=args.data, data_load_partition_seconds=data_info.get('data_load_partition_seconds'),
                                    sampling_seconds=data_info.get('sampling_seconds'))
                         row['repeat'] = repeat + 1
-                        row.update(setup_comm(row, args.net_mbps, args.net_rtt_ms))
+                        row.update(setup_comm(row, args.net_mbps, args.net_rtt_ms, args.pair_workers))
                         if row['backend'] == 'mpc-model':             # plaintext part measured + modelled MPC
                             row['setup_compute_seconds_model'] = row['setup_wall_seconds'] + row['mpc_wall_seconds']
                             row['setup_total_seconds_model'] = (row['setup_compute_seconds_model']

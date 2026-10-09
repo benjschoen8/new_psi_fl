@@ -65,7 +65,7 @@ def estimate(n, m, d, nimg, steps, gc_protocol='semi-bin', pair_concurrency=2, p
     p_mb, p_r = pad(n) if pad_max == 'mpc' else (0., 0.)
     pairs = n * (n - 1) // 2
     pair_mb = he_mb + gc_mb
-    sent, recv, rounds = [0.] * n, [0.] * n, [0.] * n
+    sent, recv, rounds, pair_rounds = [0.] * n, [0.] * n, [0.] * n, [0.] * n
     for p in range(n):
         for q in range(p + 1, n):
             s0 = he_mb / 2 + gc_mb * gc_share0                     # party 0 of the pair = the smaller id
@@ -73,6 +73,7 @@ def estimate(n, m, d, nimg, steps, gc_protocol='semi-bin', pair_concurrency=2, p
                 sent[me] += mine
                 recv[me] += pair_mb - mine
                 rounds[me] += (he_r + gc_r) / pair_concurrency     # a client's pairs run concurrently
+                pair_rounds[me] += he_r + gc_r
     for c in range(n):
         sent[c] += g_mb + p_mb
         recv[c] += g_mb + p_mb
@@ -84,7 +85,7 @@ def estimate(n, m, d, nimg, steps, gc_protocol='semi-bin', pair_concurrency=2, p
                 pad_max=pad_max, pair_sessions=pairs, pair_he_MB=pairs * he_mb, pair_gc_MB=pairs * gc_mb,
                 pair_global_MB=pairs * pair_mb, group_global_MB=n * g_mb, pad_max_MB=n * p_mb,
                 global_MB=pairs * pair_mb + n * (g_mb + p_mb),
-                client_sent_MB=sent, client_received_MB=recv, client_rounds=rounds,
+                client_sent_MB=sent, client_received_MB=recv, client_rounds=rounds, client_pair_rounds=pair_rounds,
                 matching_seconds=matching_seconds, group_seconds=group_seconds,
                 wall_seconds=matching_seconds + group_seconds, compile_seconds=0.,
                 group_peak_MB_per_party=group_memory(n, m), group_peak_MB_host=n * group_memory(n, m))

@@ -483,12 +483,13 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
     # per client: own traffic sent in every session it is a party of, traffic received from the other
     # party (pairs) or an even part of the others' traffic (n-party sessions), and rounds (summed over its
     # sessions; pair sessions divided by pair_concurrency, the partners a client runs at once)
-    sent, recv, rounds = [0.] * n, [0.] * n, [0.] * n
+    sent, recv, rounds, pair_rounds = [0.] * n, [0.] * n, [0.] * n, [0.] * n
     for (p, q), st in pair_party.items():
         for side, (me, other) in enumerate(((p, 1), (q, 0))):
             sent[me] += st['party_MB'][side]
             recv[me] += st['party_MB'][other]
             rounds[me] += st['party_rounds'][side] / pair_concurrency    # its pairs run concurrently
+            pair_rounds[me] += st['party_rounds'][side]                  # undivided (setup_smoke_hybrid)
     for st in (graph, pad_stats):
         if st is None:
             continue
@@ -501,7 +502,7 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
     pair_mb = sum(volumes) if all(value is not None for value in volumes) else None
     total_mb = pair_mb + graph['global_MB'] if pair_mb is not None and graph['global_MB'] is not None else None
     stats = dict(backend='pairwise', client_sent_MB=sent, client_received_MB=recv, client_rounds=rounds,
-                 n=n, m=m, rows=n*m, d=d if fuzzy else 0, nimg=nimg,
+                 client_pair_rounds=pair_rounds, n=n, m=m, rows=n*m, d=d if fuzzy else 0, nimg=nimg,
                  mode='fuzzy' if fuzzy else 'exact', sym=sym, prefix=prefix, block_rows=min(n*m, block_rows), edabit=edabit,
                  group_edabit=group_edabit, group_version=group_version, group_protocol=group_protocol,
                  pad_max=pad_max, pad_max_MB=pad_stats and pad_stats['global_MB'],

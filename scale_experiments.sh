@@ -44,6 +44,7 @@ setup() {  # setup <name> <clients> <class subsets> <special clients>: the only 
         --mpc-timeout "${MPC_TIMEOUT:-7200}" --net-mbps "${NET_MBPS:-100}" --net-rtt-ms "${NET_RTT_MS:-20}" \
         --out "$OUT/$1" 2>&1 | tee "$OUT/$1.log"
     [[ ${PIPESTATUS[0]} == 0 ]] || fails=1
+    $PY -m tests.plot_setup "$OUT/$1/setup.json" || true                # figure + table of this run
 }
 # setup: main split (5-6 labels per client + special clients, sizes are totals)
 has setup && setup setup "${SETUP_CLIENTS:-7 10 30 50}" "${CLASS_SUBSETS:-5,6}" "${MIXED:-2}"
