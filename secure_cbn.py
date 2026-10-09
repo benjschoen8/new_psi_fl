@@ -103,6 +103,27 @@ def row_spec(g):
     return [(k, (sd[k].shape[1],), np.float32) for k in sorted(sd) if _is_row(k)]
 
 
+def _kept(g, idx):
+    """The uploaded coordinates idx of an update: clients send only these (already sliced, same length as
+    idx) since keep indices are public before training; a full-length update (comm-only) is sliced here."""
+    return g if g.size == idx.size else g[idx]
+
+
+def _memory(devices):
+    """This process's peak / current host memory and every CUDA device's peak and reserved memory (MB)."""
+    import resource
+    out = dict(host_peak_MB=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024)   # Linux: KB
+    try:
+        with open('/proc/self/status') as f:
+            out['host_MB'] = next(int(l.split()[1]) for l in f if l.startswith('VmRSS')) / 1024
+    except (OSError, StopIteration):
+        pass
+    for d in sorted({str(d) for d in devices if str(d).startswith('cuda')}):
+        out[d] = dict(peak_MB=torch.cuda.max_memory_allocated(d) / 2**20,
+                      reserved_MB=torch.cuda.memory_reserved(d) / 2**20)
+    return out
+
+
 def encode_update(grads, U, it, ir, sc_t, sc_r, rng, fixed=False, blocks=None, res=compress.LEVELS):
     """grads {'T': trunk update, k: row-k update} (missing = zeros) -> uint64 vector:
     [trunk[it] | row 0[ir] | ... | row U-1[ir] | counts (trunk, rows) | clip fractions].
@@ -121,17 +142,19 @@ def encode_update(grads, U, it, ir, sc_t, sc_r, rng, fixed=False, blocks=None, r
         rc, rn = np.zeros(nr), np.zeros(nr)
     for k, g in grads.items():
         if k == 'T':
-            v[:kt] = q(g[it], sc_t[it])
+            g = _kept(g, it)
+            v[:kt] = q(g, sc_t[it])
             v[kt + U * kr] = 1
             if extra:
-                over = np.abs(g[it]) > sc_t[it]
+                over = np.abs(g) > sc_t[it]
                 tot = np.bincount(tb, minlength=nt)
                 v[base:base + nt] = np.round(np.bincount(tb[over], minlength=nt) / np.maximum(tot, 1) * res)
         else:
-            v[kt + k * kr:kt + (k + 1) * kr] = q(g[ir], sc_r[k][ir])
+            g = _kept(g, ir)
+            v[kt + k * kr:kt + (k + 1) * kr] = q(g, sc_r[k][ir])
             v[kt + U * kr + 1 + k] = 1
             if extra:
-                rc += np.bincount(rb[np.abs(g[ir]) > sc_r[k][ir]], minlength=nr)
+                rc += np.bincount(rb[np.abs(g) > sc_r[k][ir]], minlength=nr)
                 rn += np.bincount(rb, minlength=nr)
     if extra:
         v[base + nt:] = np.round(rc / np.maximum(rn, 1) * res)
@@ -167,9 +190,9 @@ def plain_mean(results, U, it, ir):
     for _, u in results:
         for k, g in (u[0] if u else {}).items():
             if k == 'T':
-                st += g[it]; n[0] += 1
+                st += _kept(g, it); n[0] += 1
             else:
-                sr[k] += g[ir]; n[k + 1] += 1
+                sr[k] += _kept(g, ir); n[k + 1] += 1
     return (st / n[0] if n[0] else None), {k: sr[k] / n[k + 1] for k in range(U) if n[k + 1]}, n
 
 
@@ -425,7 +448,8 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         save_every=1, keep_all=False, resume=None, seed=0, progress=False, on_resume=None, domain_check=True,
         samples_per_label=16, union_result=None, quantize=True, keep_frac=0.1, quant_scale0=0.05,
         min_holders=2, warmup_epochs=0, union='exact', keywords=None, fuzzy=None, generator_cache=None,
-        cache_every=5, guide_factory=None, guide_epochs=5, guide_weight=.5, client_procs=None, image_match=(6, 2), label_psi='circuit', circuit_tau=None, diagnostics=False):
+        cache_every=5, guide_factory=None, guide_epochs=5, guide_weight=.5, client_procs=None, image_match=(6, 2), label_psi='circuit', circuit_tau=None, diagnostics=False,
+        comm_only=False):
     """gen_factory(num_rows) -> CBN generator; disc_factory(k) -> local D over k labels.
     agg: 'secagg' (the protocol) or 'plain' (Plain-GeFL, no cryptography).
     union_result: reuse a cbn_union() output (the OPRF indices are random per run).
@@ -446,7 +470,10 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
     first trains it on its real local data for guide_epochs (cached like the generators), freezes it,
     and adds guide_weight * CE(classifier(G(z, y)), y) to its generator loss. Stays local, never sent.
     union: 'exact' (names, OPRF) or 'fuzzy' (no dictionary: keywords = per client {label: keyword}
-    in the client's own words, snapped to public anchor classes; fuzzy overrides params)."""
+    in the client's own words, snapped to public anchor classes; fuzzy overrides params).
+    comm_only: per-round communication benchmark: no training. Every client uploads a random update of
+    the real shapes (trunk + one row per own label) and the round runs downlink, encoding, SecAgg (or the
+    plain sum) and decoding exactly as in training; no global classifier, no evaluation (accuracy None)."""
     if agg not in ('plain', 'secagg'):
         raise ValueError('agg must be plain or secagg')
     quant = quantize                                                      # plain too: same compression
@@ -736,10 +763,18 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
 
     def train_client(c):
         v = local[c.id]
+        if comm_only:                                                     # benchmark: same shapes, no training
+            rng = np.random.default_rng([seed, c.id, len(history)])
+            g = {'T': rng.normal(0, 1e-3, trunk.size)}
+            for r_ in set(v['rows']):                                     # own union rows
+                g[r_] = rng.normal(0, 1e-3, P)
+            return c.id, (g,)
+        if procs is not None:                                             # worker: slices before sending back
+            v['gan'].keep = keep
         counts = v['gan'].train(v['loader'])
         if not counts:
             return c.id, None
-        dt, dr = v['gan'].update()
+        dt, dr = v['gan'].update(keep)                                    # only the uploaded coordinates
         g, cnt = {'T': dt}, {}
         for a in counts:                                                  # two own labels in one fuzzy
             r_ = v['rows'][a]                                             # group: average their rows
@@ -788,6 +823,9 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         else:
             for c in clients:
                 local[c.id]['gan'] = procs.proxy(c.id, local[c.id]['gan'])
+                local[c.id]['loader'] = None                              # the worker has the images (its own
+                if not diagnostics:                                       # file): no second copy here
+                    c.train_loader = None
             torch.set_num_threads(max(1, os.cpu_count() or 1))           # clients no longer share this process
         if any(str(d).startswith('cuda') for d in devices):
             torch.cuda.empty_cache()
@@ -841,6 +879,13 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                     local[c.id]['gan'].load_global(unflatten(trunk, spec), sent[local[c.id]['rows']])
         row['seconds']['downlink'] = time.perf_counter() - t
 
+        qr = quantize and not (r == 0 and (warmed_now or bool(ck and ck.get('warmed'))))   # first upload after
+        # the local warm-up carries the whole warm-up (far beyond round-sized scales: 8-bit clipping lost up to
+        # half of it): sent uncompressed once (plain: floats; secagg: 64-bit fixed point)
+        res = max(compress.LEVELS, (1 << 15) // (n_cl + 1))               # clip-rate resolution, no wrap
+        it = compress.keep_index(trunk.size, keep_frac if qr else 1., r, b'cbn-trunk')   # public, before
+        ir = compress.keep_index(P, keep_frac if qr else 1., r, b'cbn-rows')             # training
+        keep = (it, ir)
         t = time.perf_counter()                                           # 4. local training
         inner = tqdm(total=n_cl, desc=f'  round {r + 1} clients', unit='client', leave=False, disable=not progress)
         if workers > 1:
@@ -864,12 +909,6 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         row['seconds']['local_training'] = time.perf_counter() - t
 
         t = time.perf_counter()                                           # 5. aggregation
-        qr = quantize and not (r == 0 and (warmed_now or bool(ck and ck.get('warmed'))))   # first upload after
-        # the local warm-up carries the whole warm-up (far beyond round-sized scales: 8-bit clipping lost up to
-        # half of it): sent uncompressed once (plain: floats; secagg: 64-bit fixed point)
-        res = max(compress.LEVELS, (1 << 15) // (n_cl + 1))               # clip-rate resolution, no wrap
-        it = compress.keep_index(trunk.size, keep_frac if qr else 1., r, b'cbn-trunk')
-        ir = compress.keep_index(P, keep_frac if qr else 1., r, b'cbn-rows')
         if not qr and agg == 'plain':                                  # uncompressed Plain-GeFL
             mt, mr, n = plain_mean(results, U, it, ir)
             up = [4 * sum(g.size for g in u[0].values()) if u else 0 for _, u in results]
@@ -877,12 +916,14 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                                 upload_per_client=float(np.mean(up)))
         else:
             if qr:                                                     # diagnostic: share of clipped values
-                over = [(np.abs(g[it]) > sc_t[it]) if k == 'T' else (np.abs(g[ir]) > sc_r[k][ir])
+                over = [(np.abs(_kept(g, it)) > sc_t[it]) if k == 'T' else (np.abs(_kept(g, ir)) > sc_r[k][ir])
                         for _, u in results if u for k, g in u[0].items()]
                 row['clipped'] = float(np.concatenate(over).mean()) if over else 0.
             blocks = (bt[it], br[ir], len(spec), len(rspec)) if qr else None
-            vectors = {cid: encode_update(u[0] if u else {}, U, it, ir, sc_t, sc_r, qrng, not qr, blocks, res)
-                       for cid, u in results}                             # everyone uploads
+            vectors = {}                                                  # everyone uploads; each client's
+            for i, (cid, u) in enumerate(results):                        # float64 update is dropped once
+                vectors[cid] = encode_update(u[0] if u else {}, U, it, ir, sc_t, sc_r, qrng, not qr, blocks, res)
+                results[i] = (cid, u and ({k: None for k in u[0]},))      # encoded (only its keys are used below)
             if agg == 'secagg':
                 sa = {}
                 total, _ = run_secagg(vectors, threshold=max(2, -(-2 * n_cl // 3)),
@@ -901,7 +942,7 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
                 ct, cr = out[3]                                           # scale follows its clip rate
                 step = lambda c: np.where(c > .1, 4., np.where(c > .01, 2., np.where(c < .001, .9, 1.)))
                 mult_t, mult_r = mult_t * step(ct), mult_r * step(cr)
-                sc_t, sc_r = mult_t[bt], np.tile(mult_r[br], (U, 1))
+                sc_t, sc_r = mult_t[bt], np.broadcast_to(mult_r[br], (U, br.size))   # one row for all U: no U x P copy
                 row['clip_feedback'] = dict(trunk_max=float(ct.max()), rows_max=float(cr.max()))
             row['bytes'].update(upload=int(sa['payload_up']), upload_payload_per_client=sa['payload_up'] / n_cl,
                                 upload_per_client=(sa['payload_up'] + sa['control_up']) / n_cl)
@@ -918,7 +959,14 @@ def run(clients, label_spaces, tests, gen_factory, disc_factory, classifier_fact
         if not (np.isfinite(trunk).all() and np.isfinite(table).all()):
             raise FloatingPointError(f'round {r + 1}: non-finite global model; last checkpoint is intact')
         row['seconds']['aggregation'] = time.perf_counter() - t
+        row['memory'] = _memory(devices)
 
+        if comm_only:
+            row.update(accuracy=None, old_acc=None)
+            history.append(row)
+            if record:
+                record(row)
+            continue
         t = time.perf_counter()                                           # 6. global classifier
         g = gen_factory(U)
         load_trunk(g, unflatten(trunk, spec))

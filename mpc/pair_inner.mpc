@@ -5,7 +5,7 @@
 #
 # Inputs, both parties, per row: e_1..e_d (round(e*2^7)), r (round(r*2^14)).
 # Party 1 then: rho_e per entry e = i*m + j, uniform in [2^18, 2^58).
-# Output to party 0 only: 'X e x_e' with x_e = s_e + rho_e, s_e = 2<e_i,e'_j> - r_i - r'_j
+# Output to party 0 only, one line 'X [x_0, x_1, ...]' (one opening round), x_e = s_e + rho_e, s_e = 2<e_i,e'_j> - r_i - r'_j
 # (an integer: no wrap-around in the field). x_e is statistically hidden (distance <= 2^-39);
 # s_e is never opened. pair_gc.mpc (kw=masked) compares after reducing the shares mod 2^L.
 # The image test runs in pair_gc.mpc (a popcount is cheaper there than an HE matrix product).
@@ -14,22 +14,18 @@ A = dict(a.split('=', 1) for a in program.args if '=' in a)
 m, d = int(A['m']), int(A['d'])
 n = m * m
 
-L_, R_ = [], []
-for p in range(2):
-    Lm, Rm = sint.Matrix(m, d + 2), sint.Matrix(m, d + 2)     # Lm.Rm'^T = 2<e,e'> - r - r'
-    for i in range(m):
-        e = sint.get_input_from(p, size=d)
-        r = sint.get_input_from(p)
-        Lm[i].assign_vector(2 * e)
-        Rm[i].assign_vector(e)
-        Lm[i][d], Lm[i][d + 1] = -r, sint(-1)
-        Rm[i][d], Rm[i][d + 1] = sint(1), r
-    L_.append(Lm); R_.append(Rm)
+# Only party 0's L and party 1's R enter the product; each party inputs all its rows at once (one
+# input round): per row e_1..e_d, r.
+v = [sint.get_input_from(p, size=m * (d + 1)) for p in range(2)]
+Lm, Rm = sint.Matrix(m, d + 2), sint.Matrix(m, d + 2)         # Lm.Rm^T = 2<e,e'> - r - r'
+for i in range(m):
+    e0, r0 = v[0].get_vector(i * (d + 1), d), v[0][i * (d + 1) + d]
+    e1, r1 = v[1].get_vector(i * (d + 1), d), v[1][i * (d + 1) + d]
+    Lm[i].assign_vector(2 * e0)
+    Rm[i].assign_vector(e1)
+    Lm[i][d], Lm[i][d + 1] = -r0, sint(-1)
+    Rm[i][d], Rm[i][d + 1] = sint(1), r1
+L_, R_ = [Lm], [None, Rm]
 
-X = sint.Array(n)
-X.assign_vector(L_[0].mul_trans(R_[1]).get_vector() + sint.get_input_from(1, size=n))
-
-
-@for_range(n)
-def _(e):
-    print_ln_to(0, 'X %s %s', e, X[e].reveal_to(0))
+x = L_[0].mul_trans(R_[1]).get_vector() + sint.get_input_from(1, size=n)
+print_ln_to(0, 'X %s', x.reveal_to(0))

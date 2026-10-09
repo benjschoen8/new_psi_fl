@@ -150,6 +150,29 @@ def fixture(n, m, seed):
     return labels, samples
 
 
+CLASSES = dict(MNIST=10, EMNIST=62, FashionMNIST=10, CIFAR10=10, STL10=10, SVHN=10, USPS=10)
+SHARED = 9                                     # class names CIFAR-10 and STL-10 share (the special clients' pool)
+
+
+def allocate(names, normal, mixed, subsets, holders=2):
+    """Normal clients per dataset in proportion to the label slots each still needs for `holders`
+    holders per class (largest remainder, >= 1 each). A special client holding a name counts once for
+    CIFAR-10 and once for STL-10. Guaranteed when every dataset gets clients * lo >= its need (greedy
+    least-covered partition, see fl_datasets.partition_class_subsets); otherwise printed as partial."""
+    lo = int(subsets.split(',')[0]) if subsets and subsets != 'even' else 3
+    special = min(holders, mixed * lo // SHARED) if mixed else 0       # holders every shared name gets
+    need = {d: holders * CLASSES[d] - (SHARED * special if d in ('CIFAR10', 'STL10') else 0) for d in names}
+    spare, total = normal - len(names), sum(need.values())
+    share = {d: spare * need[d] / total for d in names}
+    counts = {d: 1 + int(share[d]) for d in names}
+    for d in sorted(names, key=lambda d: int(share[d]) - share[d])[:normal - sum(counts.values())]:
+        counts[d] += 1
+    short = {d: need[d] for d in names if counts[d] * lo < need[d]}
+    print(f'clients per dataset {counts} + {mixed} special; >= {holders} holders per label: '
+          + ('guaranteed' if not short else f'not guaranteed for {sorted(short)}'), flush=True)
+    return counts
+
+
 def real_inputs(n, args):
     """Reuse the training CLI's data components without build_clients/model construction."""
     from setup import parser, seed_all, label_names, label_samples
@@ -162,11 +185,17 @@ def real_inputs(n, args):
     for key in vars(data_args):
         if key.startswith('num_train_'):
             setattr(data_args, key, 0)
-    counts = dict(zip(('MNIST', 'EMNIST', 'CIFAR10'), (n // 3 + (i < n % 3) for i in range(3))))
+    names = getattr(args, 'datasets', 'MNIST,EMNIST,CIFAR10,FashionMNIST,STL10').split(',')   # clients split evenly, in order
+    mixed = getattr(args, 'num_train_cifar10stl10', 0)                # special CIFAR-10 + STL-10 clients, part of n
+    normal = n - mixed
+    if normal < len(names):
+        raise ValueError(f'{n} clients - {mixed} special leave {normal} for {len(names)} datasets (need one each)')
+    counts = allocate(names, normal, mixed, args.class_subsets)
     for name, count in counts.items():
         setattr(data_args, 'num_train_' + name.lower(), count)
     for key in ('seed', 'data_root', 'class_subsets', 'class_share', 'noniid_partition'):
         setattr(data_args, key, getattr(args, key))
+    data_args.num_train_cifar10stl10 = mixed
     seed_all(args.seed)
     config = OmegaConf.to_container(OmegaConf.load(args.exp_conf), resolve=True)
     if config.get('channels', 3) != 3 or config.get('img_size', 32) != 32:
@@ -232,17 +261,26 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None)
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--clients', type=int, nargs='+', default=[3, 5, 10, 30, 50],
-                        help='client counts to benchmark sequentially (default: 3 5 10 30 50)')
+    parser.add_argument('--clients', type=int, nargs='+', default=[7, 10, 30, 50],
+                        help='client counts to benchmark sequentially (default: 7 10 30 50; includes the special clients)')
     parser.add_argument('--data', choices=['real', 'synthetic'], default='real')
     parser.add_argument('--data-root', type=Path, default=Path('data/raw'))
     parser.add_argument('--exp-conf', type=Path, default=Path('config.yaml'))
     parser.add_argument('--samples-per-label', type=int, default=16)
-    parser.add_argument('--class-subsets', help='same as training CLI: LO,HI or even; default uses original Non-IID partition')
-    parser.add_argument('--class-share', choices=['split', 'full'], default='split')
+    parser.add_argument('--class-subsets', default='5,6',
+                        help='same as training CLI: LO,HI or even (default 5,6: the main experiment\'s label split); '
+                             'none: the original Dirichlet partition')
+    parser.add_argument('--class-share', choices=['split', 'full'], default='full',
+                        help='default full: every holder gets all images of its classes (the main experiment)')
+    parser.add_argument('--num-train-cifar10stl10', type=int, default=2,
+                        help='special clients with CIFAR-10 + STL-10 merged per class name, on top of --clients '
+                             '(default 2, the main experiment)')
     parser.add_argument('--noniid-partition', default='dirichlet',
                         choices=['dirichlet', 'noniid_label', 'quantity_skew', 'quantity_skew_equalSize'])
     parser.add_argument('--fuzzy-langs', default='en0,en1', help='same client keyword writers as training CLI')
+    parser.add_argument('--datasets', default='MNIST,EMNIST,CIFAR10,FashionMNIST,STL10',
+                        help='real data: datasets, clients split evenly in this order (default: the five of the '
+                             'main experiment; the earlier three: MNIST,EMNIST,CIFAR10)')
     parser.add_argument('--labels', type=int, nargs='+', help='synthetic only: labels per client (default 3)')
     parser.add_argument('--methods', nargs='+', choices=['plain', 'exact', 'fuzzy'], default=['plain', 'exact'])
     parser.add_argument('--bucket-bits', type=int,
@@ -254,10 +292,12 @@ def main(argv=None):
                         help='explicitly use ideal grouping instead of checking/downloading real MP-SPDZ')
     parser.add_argument('--out', type=Path, help='write setup.json and setup.csv in this directory')
     args = parser.parse_args(argv)
+    if args.class_subsets in ('none', ''):
+        args.class_subsets = None                                      # the original Dirichlet partition
     if args.data == 'real' and args.labels is not None:
         parser.error('--labels is synthetic only; real label spaces come from the original data partitions')
-    if args.data == 'real' and min(args.clients) < 3:
-        parser.error('real mixed data needs >=3 clients (at least one per dataset)')
+    if args.data == 'real' and min(args.clients) < len(args.datasets.split(',')) + args.num_train_cifar10stl10:
+        parser.error('real data needs >= one client per dataset + the special clients')
     if min(args.clients) < 2 or min(args.labels or [3]) < 1 or args.repeats < 1 or args.workers < 1 or args.samples_per_label < 1:
         parser.error('need >=2 clients and positive labels, repeats, and workers')
     if any(not lang.strip() for lang in args.fuzzy_langs.split(',')):

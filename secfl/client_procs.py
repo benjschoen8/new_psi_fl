@@ -64,7 +64,7 @@ def _serve(conn, device, flags, threads):
                 out = None
             elif cmd == 'train':
                 counts = gans[cid].train(loaders[cid])
-                out = (counts, gans[cid].update() if counts else None)
+                out = (counts, gans[cid].update(arg) if counts else None)
             elif cmd == 'load_global':
                 gans[cid].load_global(*arg)
                 out = None
@@ -158,12 +158,13 @@ class ClientProxy:
         self._pool, self._cid = pool, cid
         self.device, self.epochs, self.guide = gan.device, gan.epochs, gan.guide
         self._update = None
+        self.keep = None                                         # uploaded coordinates of this round
 
     def train(self, loader=None):
-        counts, self._update = self._pool.call(self._cid, 'train')
+        counts, self._update = self._pool.call(self._cid, 'train', self.keep)
         return counts
 
-    def update(self):
+    def update(self, keep=None):
         return self._update
 
     def load_global(self, trunk, own_rows):

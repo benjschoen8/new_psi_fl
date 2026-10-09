@@ -67,3 +67,37 @@ class CircuitUnionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class FiveDatasetKeywordTests(unittest.TestCase):
+    """The main experiment's similar (fuzzy) keywords: with the PCA used in the setup (48), every pair of
+    different classes stays below tau and the same class (en0 / en1 writers) above it, so the keyword test
+    alone gives the true union (pair MCC 1.0). Needs the encoder cache (data/encoder)."""
+
+    def test_keywords_separate_classes(self):
+        import itertools
+        from pathlib import Path
+        from label_union import encoder
+        from label_union.circuit_union import keyword_rows, TAU, FIX
+        from label_union.pca import project
+        from rt_descriptions import keyword
+        from fl_datasets import stl10_classes
+        if not Path(encoder._cache_path(encoder.DEFAULT_MODEL, encoder.CACHE_DIR)).exists():
+            self.skipTest('no encoder cache')
+        fashion = ['T-shirt/top', 'Trouser', 'Pullover', 'Dress', 'Coat', 'Sandal', 'Shirt', 'Sneaker', 'Bag',
+                   'Ankle boot']
+        cifar = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
+        classes = ([('MNIST', str(i)) for i in range(10)] + [('FashionMNIST', x) for x in fashion]
+                   + [('CIFAR10', x) for x in cifar] + [('STL10', x) for x in stl10_classes()])
+        rows = {}
+        for lang in ('en0', 'en1'):
+            kws = {(d, x, lang): keyword(d, x, lang) for d, x in classes}
+            got = project(keyword_rows(kws, True), 48)
+            rows.update(got)
+        tau = round(TAU * (1 << 2 * FIX))
+        s = lambda a, b: 2 * int(rows[a][1] @ rows[b][1]) - rows[a][2] - rows[b][2]
+        for a, b in itertools.combinations(rows, 2):
+            if rows[a][0] != 'emb' or rows[b][0] != 'emb':
+                continue
+            same = a[1] == b[1]                                     # STL-10 uses CIFAR-10's names
+            self.assertEqual(s(a, b) >= tau, same, (a, b, s(a, b) / (1 << 2 * FIX)))

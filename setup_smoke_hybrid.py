@@ -68,7 +68,7 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None,
               mpc_mode='pairwise', pair_concurrency=2, pair_workers=4, mpc_timeout=600,
               group_prefix='parallel', group_block_rows=64, group_edabit=False,
               group_version=1, group_protocol='shamir', pair_protocol='semi',
-              pca_dim=None, simhash_bits=256, simhash_u0=1.0):
+              pca_dim=None, simhash_bits=256, simhash_u0=1.0, gc_protocol='yao', pad_max='plain', mpc_model=False):
     # Make every trial include cold public image-anchor construction. The single
     # process then shares that cache, as in the current simulation, not n hosts.
     anchor_matrix.cache_clear()
@@ -85,16 +85,22 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None,
                                pair_concurrency=pair_concurrency, pair_workers=pair_workers,
                                group_edabit=group_edabit, group_version=group_version,
                                group_protocol=group_protocol, pair_protocol=pair_protocol)
+            mpc_options.update(pad_max=pad_max)
+            if mpc_model:
+                mpc_options.update(model=True)
+            if pair_protocol in ('hegc', 'simhash'):
+                mpc_options.update(gc_protocol=gc_protocol)
             if pair_protocol == 'simhash':
                 mpc_options.update(simhash_bits=simhash_bits, simhash_u0=simhash_u0)
             if pca_dim:
                 mpc_options.update(pca_dim=pca_dim)
         options = dict(mpc_backend=mpc_mode, mpc_options=mpc_options)
-    _, _, _, U, stats = circuit_union_with_keys(
+    index, _, _, U, stats = circuit_union_with_keys(
         labels, keywords if method == 'fuzzy' and keywords is not None else [{x: x for x in own} for own in labels], sets,
         fuzzy=method == 'fuzzy', secure=method != 'plain',
         bucket_bits=bucket_bits, workers=workers, **options)
     elapsed = time.perf_counter() - start
+    quality = union_quality(labels, index, U) if index else {}
     union_seconds = time.perf_counter() - union_start
     mpc = stats.get('mpc', {})
     measured = mpc.get('measured')
@@ -108,6 +114,7 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None,
         labels_per_client_min=min(map(len, labels)), labels_per_client_mean=float(np.mean(list(map(len, labels)))),
         bucket_bits=bucket_bits, union_size=U,
         backend=('plain' if method == 'plain' else
+                 'mpc-model' if pairwise and mpc_model else
                  'mp-spdz-pairwise' if pairwise else
                  'mp-spdz' if measured else 'ideal-functionality'),
         setup_wall_seconds=elapsed, image_setup_seconds=image_seconds,
@@ -130,6 +137,9 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None,
         simhash_bits=(measured or {}).get('simhash_bits'),
         pair_he_MB=(measured or {}).get('pair_he_MB'),
         pair_gc_MB=(measured or {}).get('pair_gc_MB'),
+        gc_protocol=(measured or {}).get('gc_protocol'),
+        pad_max=(measured or {}).get('pad_max'),
+        pad_max_MB=(measured or {}).get('pad_max_MB'),
         pair_batches=(measured or {}).get('pair_batches'),
         pair_sessions=(measured or {}).get('pair_sessions'),
         max_parallel_pairs=(measured or {}).get('max_parallel_pairs'),
@@ -137,8 +147,50 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None,
         estimated_download_bytes_per_client=download,
         estimated_upload_bytes_total=None if upload is None else len(labels) * upload,
         estimated_download_bytes_total=None if download is None else len(labels) * download,
-        secagg_accounted_bytes=stats.get('secagg'), mpc_measured=measured,
+        **quality, secagg_accounted_bytes=stats.get('secagg'), mpc_measured=measured,
         protocol_stats=stats)
+
+
+def union_quality(labels, index, U):
+    """Experimenter only: the union against the true label names (same name = same class; STL-10 uses
+    CIFAR-10's names). pair MCC over all pairs of (client, label) rows of different clients: positive =
+    same true name, predicted positive = same union index."""
+    from label_union import index_metrics
+    rows = [(c, x) for c, own in enumerate(labels) for x in own]
+    tp = fp = fn = tn = 0
+    for i, (c, x) in enumerate(rows):
+        for d, y in rows[i + 1:]:
+            if c == d:
+                continue
+            same, pred = x == y, index[c][x] == index[d][y]
+            tp, fp, fn, tn = tp + (same and pred), fp + (pred and not same), fn + (same and not pred), tn + (not same and not pred)
+    den = ((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)) ** .5
+    m = index_metrics(labels, index, U, sorted({x for own in labels for x in own}))
+    return dict(union_exact=bool(m['exact']), pair_mcc=(tp * tn - fp * fn) / den if den else float(fp == fn == 0),
+                pair_tp=tp, pair_fp=fp, pair_fn=fn, split_labels=len(m['split_labels']), merged_indices=len(m['merged_indices']))
+
+
+UNION_ROUNDS = 3        # union/key SecAgg after the MPC: upload tags, masked keys, download result
+
+
+def setup_comm(row, mbps, rtt_ms):
+    """Per-client setup communication: measured MP-SPDZ traffic (each party's own 'Data sent', plus what
+    it receives) and rounds, plus the union/key SecAgg bytes; modelled time = bytes * 8 / bandwidth +
+    rounds * RTT on the slowest client (MPC rounds summed over its sessions: an upper bound)."""
+    mpc, sa, n = row.get('mpc_measured') or {}, row.get('secagg_accounted_bytes') or {}, row['clients']
+    union_up = (sa.get('payload_up', 0) + sa.get('control_up', 0)) / n
+    union_down = sa.get('control_down', 0) / n
+    sent = mpc.get('client_sent_MB') or [0.] * n
+    recv = mpc.get('client_received_MB') or [0.] * n
+    rounds = mpc.get('client_rounds') or [0.] * n
+    total = [(s + r) * 1e6 + union_up + union_down for s, r in zip(sent, recv)]
+    secs = [b * 8 / (mbps * 1e6) + (k + UNION_ROUNDS) * rtt_ms / 1e3 for b, k in zip(total, rounds)]
+    return dict(comm_MB_per_client_mean=sum(total) / n / 1e6, comm_MB_per_client_max=max(total) / 1e6,
+                mpc_MB_per_client_mean=sum(s + r for s, r in zip(sent, recv)) / n,
+                union_MB_per_client=(union_up + union_down) / 1e6,
+                comm_rounds_per_client_max=max(rounds) + UNION_ROUNDS,
+                comm_seconds_model_max=max(secs), comm_seconds_model_mean=sum(secs) / n,
+                net_mbps=mbps, net_rtt_ms=rtt_ms)
 
 
 def approx_check(labels, samples, keywords, bits=(128, 256, 512), dims=(32, 48, 64, 128), tau=None, t=2):
@@ -175,19 +227,26 @@ def approx_check(labels, samples, keywords, bits=(128, 256, 512), dims=(32, 48, 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--clients', type=int, nargs='+', default=[3, 10],
-                        help='client counts to benchmark sequentially (default: 3 10)')
+    parser.add_argument('--clients', type=int, nargs='+', default=[50],
+                        help='client counts to benchmark sequentially (default: 50, the main split; includes the special clients)')
     parser.add_argument('--data', choices=['real', 'synthetic'], default='real')
     parser.add_argument('--data-root', type=Path, default=Path('data/raw'))
     parser.add_argument('--exp-conf', type=Path, default=Path('config.yaml'))
     parser.add_argument('--samples-per-label', type=int, default=16)
-    parser.add_argument('--class-subsets', help='same as training CLI: LO,HI or even; default uses original Non-IID partition')
-    parser.add_argument('--class-share', choices=['split', 'full'], default='split')
+    parser.add_argument('--class-subsets', default='5,6',
+                        help='same as training CLI: LO,HI or even (default 5,6: the main experiment\'s label split); '
+                             'none: the original Dirichlet partition')
+    parser.add_argument('--class-share', choices=['split', 'full'], default='full',
+                        help='default full: every holder gets all images of its classes (the main experiment)')
+    parser.add_argument('--num-train-cifar10stl10', type=int, default=2,
+                        help='special clients with CIFAR-10 + STL-10 merged per class name, on top of --clients '
+                             '(default 2, the main experiment)')
     parser.add_argument('--noniid-partition', default='dirichlet',
                         choices=['dirichlet', 'noniid_label', 'quantity_skew', 'quantity_skew_equalSize'])
     parser.add_argument('--fuzzy-langs', default='en0,en1', help='same client keyword writers as training CLI')
     parser.add_argument('--labels', type=int, nargs='+', help='synthetic only: labels per client (default 3)')
-    parser.add_argument('--methods', nargs='+', choices=['plain', 'exact', 'fuzzy'], default=['fuzzy'])
+    parser.add_argument('--methods', nargs='+', choices=['plain', 'exact', 'fuzzy', 'similar'], default=['fuzzy'],
+                        help='similar = new name of fuzzy (same method)')
     parser.add_argument('--bucket-bits', type=int,
                         help='default 20 for real data (production size), 16 for synthetic')
     parser.add_argument('--workers', type=int, default=1)
@@ -214,11 +273,24 @@ def main(argv=None):
                         help='two-party matching: semi (OT) or hemi (HE matrix triples; NTT prime for both stages), '
                              'hegc (HE inner products + garbled comparison, exact CSLS) or simhash (garbled SimHash test, '
                              'approximate CSLS); hegc/simhash use grouping version 2')
+    parser.add_argument('--gc-protocol', choices=['yao', 'semi-bin'], default='yao',
+                        help='hegc/simhash binary 2PC: yao (garbled circuit) or semi-bin (OT-based GMW, less traffic, more rounds)')
+    parser.add_argument('--pad-max', choices=['plain', 'mpc'], default='plain',
+                        help='padding size m = largest label count: computed in plaintext (default) or by an n-party '
+                             'MPC that opens only the maximum')
     parser.add_argument('--pca-dim', type=int,
                         help='project keyword embeddings onto the top-k PCA axes of the public anchor words (fuzzy only)')
     parser.add_argument('--simhash-bits', type=int, default=256, help='simhash: hyperplanes, multiple of 64 (default 256)')
     parser.add_argument('--simhash-u0', type=float, default=1.0,
                         help='simhash: linearisation point of arccos((tau + r + r\')/2) (default 1.0)')
+    parser.add_argument('--datasets', default='MNIST,EMNIST,CIFAR10,FashionMNIST,STL10',
+                        help='real data: datasets, clients split evenly in this order (default: the five of the '
+                             'main experiment; the earlier three: MNIST,EMNIST,CIFAR10)')
+    parser.add_argument('--mpc-model', action='store_true',
+                        help='no MP-SPDZ: grouping as its ideal functionality, MPC traffic / rounds / time from the '
+                             'fitted cost model (label_union.mpc_model; hegc, atlas, grouping version 2)')
+    parser.add_argument('--net-mbps', type=float, default=100., help='modelled link speed per client (Mbit/s)')
+    parser.add_argument('--net-rtt-ms', type=float, default=20., help='modelled round-trip time (ms)')
     parser.add_argument('--approx-check', action='store_true',
                         help='no MPC: compare exact CSLS groupings with simhash and PCA groupings on the same fuzzy inputs')
     parser.add_argument('--approx-bits', type=int, nargs='*', default=[128, 256, 512],
@@ -231,6 +303,9 @@ def main(argv=None):
                         help='explicitly use ideal grouping instead of checking/downloading real MP-SPDZ')
     parser.add_argument('--out', type=Path, help='write setup.json and setup.csv in this directory')
     args = parser.parse_args(argv)
+    if args.class_subsets in ('none', ''):
+        args.class_subsets = None                                      # the original Dirichlet partition
+    args.methods = ['fuzzy' if m == 'similar' else m for m in args.methods]
     if args.group_version is None:
         args.group_version = 2 if args.pair_protocol in ('hegc', 'simhash') else 1
     if args.pair_protocol in ('hegc', 'simhash') and args.group_version != 2:
@@ -244,8 +319,8 @@ def main(argv=None):
         parser.error('--pair-concurrency, --pair-workers, --group-block-rows, and --mpc-timeout must be positive')
     if args.data == 'real' and args.labels is not None:
         parser.error('--labels is synthetic only; real label spaces come from the original data partitions')
-    if args.data == 'real' and min(args.clients) < 3:
-        parser.error('real mixed data needs >=3 clients (at least one per dataset)')
+    if args.data == 'real' and min(args.clients) < len(args.datasets.split(',')) + args.num_train_cifar10stl10:
+        parser.error('real data needs >= one client per dataset + the special clients')
     if min(args.clients) < 2 or min(args.labels or [3]) < 1 or args.repeats < 1 or args.workers < 1 or args.samples_per_label < 1:
         parser.error('need >=2 clients and positive labels, repeats, and workers')
     if any(not lang.strip() for lang in args.fuzzy_langs.split(',')):
@@ -254,7 +329,9 @@ def main(argv=None):
         args.bucket_bits = 20 if args.data == 'real' else 16
     if not 8 <= args.bucket_bits <= 24:
         parser.error('--bucket-bits must be between 8 and 24')
-    secure = any(m != 'plain' for m in args.methods) and not args.approx_check
+    if args.mpc_model and (args.pair_protocol != 'hegc' or args.group_protocol != 'atlas' or args.mpc_mode != 'pairwise'):
+        parser.error('--mpc-model models --pair-protocol hegc --group-protocol atlas --mpc-mode pairwise')
+    secure = any(m != 'plain' for m in args.methods) and not args.approx_check and not args.mpc_model
     if not args.simulate and min(args.clients) < 3 and secure:
         parser.error('MP-SPDZ needs at least 3 clients')
     if args.simulate:
@@ -263,7 +340,8 @@ def main(argv=None):
         try:
             root = ensure_mpspdz()
             if args.mpc_mode in {'pairwise', 'both'}:
-                pair_binaries = {'hegc': ['yao-party.x', 'hemi-party.x'], 'simhash': ['yao-party.x']}.get(
+                gc = f'{args.gc_protocol}-party.x'
+                pair_binaries = {'hegc': [gc, 'hemi-party.x'], 'simhash': [gc]}.get(
                     args.pair_protocol, [f'{args.pair_protocol}-party.x'])
                 ensure_pairwise_backend(root, (*pair_binaries, f'{args.group_protocol}-party.x'))
             ensure_certificates(root, max(args.clients))
@@ -325,7 +403,8 @@ def main(argv=None):
                                             group_edabit=args.group_edabit, group_version=args.group_version,
                                             group_protocol=args.group_protocol, pair_protocol=args.pair_protocol,
                                             pca_dim=args.pca_dim, simhash_bits=args.simhash_bits,
-                                            simhash_u0=args.simhash_u0)
+                                            simhash_u0=args.simhash_u0, gc_protocol=args.gc_protocol,
+                                            pad_max=args.pad_max, mpc_model=args.mpc_model)
                         except (RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:
                             # Keep completed trials and public diagnostics even on the first failure.
                             # Never serialize input rows, private outputs, or raw process logs.
@@ -341,6 +420,11 @@ def main(argv=None):
                         row.update(data_source=args.data, data_load_partition_seconds=data_info.get('data_load_partition_seconds'),
                                    sampling_seconds=data_info.get('sampling_seconds'))
                         row['repeat'] = repeat + 1
+                        row.update(setup_comm(row, args.net_mbps, args.net_rtt_ms))
+                        if row['backend'] == 'mpc-model':             # plaintext part measured + modelled MPC
+                            row['setup_compute_seconds_model'] = row['setup_wall_seconds'] + row['mpc_wall_seconds']
+                            row['setup_total_seconds_model'] = (row['setup_compute_seconds_model']
+                                                                + row['comm_seconds_model_max'])
                         report['results'].append(row)
                         if args.out:
                             save_report(args.out, report)
@@ -348,8 +432,16 @@ def main(argv=None):
                         down = row['estimated_download_bytes_per_client']
                         up_text = 'unknown' if up is None else f'{up:.0f}'
                         down_text = 'unknown' if down is None else f'{down:.0f}'
+                        if row['backend'] == 'mpc-model':
+                            print(f"{method:<8} {mode:<8} {n:>3} {m:>6} {row['union_size']:>5}  MODEL: MPC "
+                                  f"{row['mpc_global_MB']:.0f} MB total, {row['comm_MB_per_client_mean']:.0f} MB/client, "
+                                  f"compute {row['setup_compute_seconds_model']:.1f} s + comm {row['comm_seconds_model_max']:.1f} s "
+                                  f"= {row['setup_total_seconds_model']:.1f} s, MCC {row.get('pair_mcc', float('nan')):.3f}", flush=True)
+                            continue
                         print(f"{method:<8} {mode:<8} {n:>3} {m:>6} {row['union_size']:>5} {row['setup_wall_seconds']:>10.4f} "
-                              f"{up_text:>14} {down_text:>14}  {row['backend']}", flush=True)
+                              f"{up_text:>14} {down_text:>14}  {row['backend']}  comm {row['comm_MB_per_client_mean']:.1f} MB/client, "
+                              f"model {row['comm_seconds_model_max']:.1f} s"
+                              + (f", MCC {row['pair_mcc']:.3f}" if 'pair_mcc' in row else ''), flush=True)
     if args.out:
         print(f'Results: {args.out / "setup.json"} and {args.out / "setup.csv"}')
     for note in notes:

@@ -6,3 +6,4 @@ scikit-learn
 matplotlib
 tqdm
 cryptography
+sentence-transformers

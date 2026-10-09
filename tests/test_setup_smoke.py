@@ -28,9 +28,9 @@ class SetupSmokeTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'interrupted last trial'):
                     setup_smoke.main(['--data', 'synthetic', '--simulate', '--methods', 'exact', '--out', directory])
             report = json.loads((Path(directory) / 'setup.json').read_text())
-            self.assertEqual(report['config']['clients'], [3, 5, 10, 30, 50])
-            self.assertEqual([r['clients'] for r in report['results']], [3, 5, 10, 30])
-            self.assertEqual(len((Path(directory) / 'setup.csv').read_text().splitlines()), 5)
+            self.assertEqual(report['config']['clients'], [7, 10, 30, 50])
+            self.assertEqual([r['clients'] for r in report['results']], [7, 10, 30])
+            self.assertEqual(len((Path(directory) / 'setup.csv').read_text().splitlines()), 4)
 
     def test_certificates_cover_50_parties_and_are_reused(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -146,18 +146,19 @@ runpy.run_module('setup_smoke', run_name='__main__')
             load=lambda p: {'dirichlet_alpha': .1}, to_container=lambda c, **kw: c))
         args = SimpleNamespace(seed=2026, data_root=Path('/existing/data'), exp_conf=Path('config.yaml'),
                                class_subsets=None, class_share='split', noniid_partition='dirichlet',
-                               samples_per_label=16, fuzzy_langs='en0,en1')
+                               samples_per_label=16, fuzzy_langs='en0,en1', datasets='MNIST,EMNIST,CIFAR10')
         with patch.dict(sys.modules, {'fl_datasets': fake_fl, 'omegaconf': fake_conf}):
             with patch.object(setup, 'seed_all'), patch.object(setup, 'label_samples',
                     side_effect=lambda loader, names, k: {names[0]: setup_smoke.np.zeros((k, 3, 32, 32))}) as sample:
                 names, samples, keywords, meta = setup_smoke.real_inputs(5, args)
-        self.assertEqual(meta['dataset_clients'], {'MNIST': 2, 'EMNIST': 2, 'CIFAR10': 1})
+        self.assertEqual(meta['dataset_clients'], {'MNIST': 1, 'EMNIST': 3, 'CIFAR10': 1})   # by label slots needed
         self.assertEqual(received[0].num_new_clients, 0)
         self.assertEqual(received[0].num_train_usps, 0)
         self.assertEqual(names[-1], ['cat', 'dog'])
         self.assertEqual(names[2], ['A', 'a'])
         self.assertEqual(keywords[0]['0'], 'zero')
-        self.assertEqual(keywords[1]['0'], 'Zero')
+        from rt_descriptions import keyword
+        self.assertEqual(keywords[1]['A'], keyword('EMNIST', 'A', 'en1'))
         self.assertEqual(sample.call_count, 5)
         self.assertEqual(len(samples[0]['0']), 16)
 
@@ -169,7 +170,8 @@ runpy.run_module('setup_smoke', run_name='__main__')
                     [{'cat': 'Cat'}] * 3, {'source': 'real', 'data_load_partition_seconds': 2., 'sampling_seconds': .5})
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
             with patch('setup_smoke.real_inputs', return_value=prepared) as inputs, patch('setup_smoke.fixture') as synthetic, patch('setup_smoke.benchmark', return_value=row) as bench, patch('setup_smoke.ensure_mpspdz', return_value=Path('/mp-spdz')), patch('setup_smoke.ensure_certificates'):
-                setup_smoke.main(['--clients', '3', '--methods', 'exact', '--out', directory])
+                setup_smoke.main(['--clients', '3', '--datasets', 'MNIST,EMNIST,CIFAR10', '--num-train-cifar10stl10', '0',
+                                 '--methods', 'exact', '--out', directory])
                 inputs.assert_called_once()
                 synthetic.assert_not_called()
                 self.assertEqual(bench.call_args.args[3], 20)

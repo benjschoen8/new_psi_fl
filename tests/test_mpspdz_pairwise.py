@@ -96,7 +96,7 @@ def test_session_timeout_or_party_failure_reaps_every_child(tmp_path, fail_early
     monkeypatch.setattr(module.subprocess, 'Popen', record_child)
     start = time.monotonic()
     with pytest.raises(RuntimeError, match='party failed|timed out') as err:
-        module._run_session(tmp_path, str(script), 3, 'unused', tmp_path / 'in', tmp_path / 'out', tmp_path / 'log', timeout=2 if fail_early else .4)
+        module._run_session_once(tmp_path, str(script), 3, 'unused', tmp_path / 'in', tmp_path / 'out', tmp_path / 'log', timeout=2 if fail_early else .4)
     if fail_early:
         assert 'party=1' in str(err.value)
         assert ('SIGKILL' if fail_early == 'signal' else 'exit=7') in str(err.value)
@@ -210,8 +210,8 @@ def _garbled_case(case, rng):
 @pytest.mark.skipif(not os.environ.get('MPSPDZ'), reason='set MPSPDZ for actual hegc/simhash integration')
 @pytest.mark.parametrize('case', ['exact', 'transitive', 'fuzzy', 'sym'])
 @pytest.mark.parametrize('pair', ['hegc', 'simhash'])
-@pytest.mark.parametrize('group_protocol', ['shamir', 'atlas'])
-def test_garbled_pair_versions_match_ideal(case, pair, group_protocol):
+@pytest.mark.parametrize('group_protocol,gc', [('shamir', 'yao'), ('atlas', 'yao'), ('atlas', 'semi-bin')])
+def test_garbled_pair_versions_match_ideal(case, pair, group_protocol, gc):
     from label_union.circuit_union import group
     from label_union import simhash
     rows, owners, t = _garbled_case(case, np.random.default_rng(3))
@@ -219,7 +219,7 @@ def test_garbled_pair_versions_match_ideal(case, pair, group_protocol):
     expected, _ = group(rows, .10, t, owners, kw_match=match)
     got, stats, keys = runner().mpspdz_pairwise_group(rows, owners, t=t, m=max(owners.count(c) for c in set(owners)) + 1,
         timeout=120, pair_workers=2, group_version=2, group_protocol=group_protocol, pair_protocol=pair,
-        simhash_bits=128)
+        simhash_bits=128, gc_protocol=gc)
     assert got == expected
     assert all((keys[a] == keys[b]) == (got[a] == got[b]) for a in range(len(rows)) for b in range(len(rows)))
     assert stats['pair_gc_MB'] > 0
@@ -264,3 +264,15 @@ def test_pca_projection_keeps_close_pairs_close():
     out = project(rows, 8, anchors=anchors)
     assert out['s'] == rows['s'] and len(out['a'][1]) == 8
     assert out['a'][1] @ out['b'][1] > .95 * 128 * 128 and 0 < out['a'][2] <= 1 << 14
+
+
+@pytest.mark.skipif(not os.environ.get('MPSPDZ'), reason='set MPSPDZ for the padding-size MPC')
+@pytest.mark.parametrize('pair', ['semi', 'hegc'])
+def test_padding_size_by_mpc(pair):
+    from label_union.circuit_union import group
+    rows, owners, t = _garbled_case('fuzzy', np.random.default_rng(3))
+    rows, owners = rows + [rows[0]], owners + [0]            # client 0 holds the most rows (3)
+    expected, _ = group(rows, .10, t, owners)
+    got, stats, _ = runner().mpspdz_pairwise_group(rows, owners, t=t, timeout=120, pair_workers=2,
+        group_version=2, group_protocol='atlas', pair_protocol=pair, pad_max='mpc')
+    assert got == expected and stats['m'] == 3 and stats['pad_max_MB'] > 0

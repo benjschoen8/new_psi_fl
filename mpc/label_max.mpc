@@ -1,0 +1,14 @@
+# Padding size by MPC (option pad_max='mpc' of label_union.mpspdz_pairwise): every client inputs
+# its number of labels; only the maximum is opened (the padding size m every client pads to).
+#
+#   ./compile.py label_max n=10 bits=16
+#
+# Input of party p: one integer, 0 <= count < 2^bits. Output (public): 'M <max>'.
+
+A = dict(a.split('=', 1) for a in program.args if '=' in a)
+n, bits = int(A['n']), int(A.get('bits', 16))
+best = sint.get_input_from(0)
+for p in range(1, n):
+    c = sint.get_input_from(p)
+    best = c.greater_than(best, bit_length=bits + 1).if_else(c, best)
+print_ln('M %s', best.reveal())

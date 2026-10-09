@@ -56,25 +56,30 @@ class ClassSubsetDataset(Dataset):
         return img, self.remap[int(y)]
 
 
-def partition_class_subsets(train_labels, test_labels, n_clients, lo, hi, seed, min_holders=2, full=False):
+def partition_class_subsets(train_labels, test_labels, n_clients, lo, hi, seed, min_holders=2, full=False, cover0=None):
     """Every client draws k in [lo, hi] classes; classes go to the least-covered ones first (random
     ties), so coverage is even; redrawn until every class has >= min_holders clients (if possible).
     A class's train / test samples are split evenly at random among its holders (full=True: every
     holder gets all of them).
+    cover0: holders a class already has elsewhere (the CIFAR-10 + STL-10 special clients), counted in
+    'least covered'; greedy keeps max - min cover <= 1, so >= 2 holders per class whenever
+    sum(k) + sum(cover0) >= 2 C.
     Returns (classes per client (sorted global ids), train idcs, test idcs)."""
     train_labels, test_labels = np.asarray(train_labels), np.asarray(test_labels)
     C, rng = int(max(train_labels.max(), test_labels.max())) + 1, np.random.default_rng(seed)
     for _ in range(1000):
         ks = rng.integers(lo, hi + 1, n_clients)
-        cover, own = np.zeros(C, int), []
+        cover, own = np.zeros(C, int) if cover0 is None else np.array(cover0, int), []
         for k in ks:
             order = np.lexsort((rng.random(C), cover))                  # least covered first, random ties
             mine = np.sort(order[:k])
             cover[mine] += 1
             own.append(mine)
-        if cover.min() >= min(min_holders, ks.sum() // C):
+        if cover.min() >= min(min_holders, cover.sum() // C):
             break
-    return _split_among_holders(own, train_labels, test_labels, C, rng, full)
+    # full: nothing is divided, so a class no client drew is simply absent (e.g. 6 clients x 3-4 of
+    # EMNIST's 62 classes); split keeps the old check that every image has a holder
+    return _split_among_holders(own, train_labels, test_labels, C, rng, full, allow_uncovered=full)
 
 
 def partition_even(train_labels, test_labels, n_clients, seed, holders=2, full=False):
@@ -101,13 +106,15 @@ def partition_even(train_labels, test_labels, n_clients, seed, holders=2, full=F
     return _split_among_holders([np.sort(m) for m in own], train_labels, test_labels, C, rng, full)
 
 
-def _split_among_holders(own, train_labels, test_labels, C, rng, full=False):
+def _split_among_holders(own, train_labels, test_labels, C, rng, full=False, allow_uncovered=False):
     """A class's train / test samples split evenly at random among the clients holding it
     (full=True: every holder gets all of them)."""
     n = len(own)
     tr, te = {i: [] for i in range(n)}, {i: [] for i in range(n)}
     for c in range(C):
         holders = [i for i in range(n) if c in own[i]]
+        if not holders and allow_uncovered:
+            continue
         if not holders:
             raise ValueError(f'class {c} has no client: too few classes per client to cover all {C}')
         for labels, out in ((train_labels, tr), (test_labels, te)):
@@ -115,6 +122,81 @@ def _split_among_holders(own, train_labels, test_labels, C, rng, full=False):
             for h, part in zip(holders, [idx] * len(holders) if full else np.array_split(idx, len(holders))):
                 out[h] += part.tolist()
     return [m.tolist() for m in own], tr, te
+
+
+def _targets(ds):
+    if hasattr(ds, 'targets'):
+        return list(ds.targets)
+    if hasattr(ds, 'labels'):
+        return list(ds.labels)
+    return [label for _, label in ds.samples]
+
+
+class MergedClassDataset(Dataset):
+    """One client's labels over several datasets with the same class names (CIFAR-10 + STL-10): every
+    part is a ClassSubsetDataset view renumbered in the same name order, so 'cat' is one local label
+    with the images of both datasets. classes / remap / indices as label_names and the metadata expect
+    (indices: the second dataset's image ids are offset by the first dataset's length)."""
+    def __init__(self, parts, classes, offsets):
+        self.parts, self.classes, self.remap = parts, list(classes), {i: i for i in range(len(classes))}
+        self.indices = [o + int(i) for p, o in zip(parts, offsets) for i in p.indices]
+        self._starts = np.cumsum([0] + [len(p) for p in parts])
+
+    def __len__(self):
+        return int(self._starts[-1])
+
+    def __getitem__(self, idx):
+        k = int(np.searchsorted(self._starts, idx, side='right')) - 1
+        return self.parts[k][idx - int(self._starts[k])]
+
+
+def mixed_choice(n_clients, lo, hi, seed, root):
+    """Class names of each special client: k in [lo, hi] of the names CIFAR-10 and STL-10 share,
+    least covered first (random ties). Computed before the per-dataset split, which counts them."""
+    rng = np.random.default_rng(seed)
+    stl = set(get_readable_class_names('STL10', root=root))
+    shared = [x for x in get_readable_class_names('CIFAR10', root=root) if x in stl]   # CIFAR-10 order
+    cover, out = np.zeros(len(shared), int), []
+    for _ in range(n_clients):
+        mine = sorted(np.lexsort((rng.random(len(shared)), cover))[:int(rng.integers(lo, hi + 1))])
+        cover[mine] += 1
+        out.append([shared[j] for j in mine])
+    return out
+
+
+def mixed_cifar_stl_clients(n_clients, lo, hi, seed, root, batch_size):
+    """Special clients holding CIFAR-10 and STL-10 together: each draws k in [lo, hi] of the classes the
+    two share by name (least covered first, random ties), and gets ALL train / test images of those
+    classes from BOTH datasets, merged into one label per name. Their test data stays per dataset:
+    entry['tests'] = [('CIFAR10', loader), ('STL10', loader)] (accuracy counts towards each dataset)."""
+    parts = {}
+    for d in ('CIFAR10', 'STL10'):
+        names = list(get_readable_class_names(d, root=root))
+        tr, te = get_raw_dataset_transform(d, root, train=True), get_raw_dataset_transform(d, root, train=False)
+        parts[d] = (names, tr, te, np.asarray(_targets(tr)), np.asarray(_targets(te)))
+    entries = []
+    for i, classes in enumerate(mixed_choice(n_clients, lo, hi, seed, root)):
+        views = {}
+        for split in ('train', 'test'):
+            vs, offs, off = [], [], 0
+            for d in ('CIFAR10', 'STL10'):
+                names, tr, te, ytr, yte = parts[d]
+                base, y = (tr, ytr) if split == 'train' else (te, yte)
+                ids = [names.index(x) for x in classes]                        # same local order in both
+                vs.append(Subset(ClassSubsetDataset(base, ids, names), np.flatnonzero(np.isin(y, ids)).tolist()))
+                offs.append(off)
+                off += len(base)
+            views[split] = (vs, offs)
+        print(f"CIFAR10+STL10 client {i}: {len(classes)} classes {classes}, "
+              f"{sum(len(v) for v in views['train'][0])} train images (both datasets, merged per name)")
+        entries.append({
+            'train': DataLoader(MergedClassDataset(*views['train'][:1], classes, views['train'][1]),
+                                batch_size=batch_size, shuffle=True, num_workers=0),
+            'test': DataLoader(MergedClassDataset(*views['test'][:1], classes, views['test'][1]),
+                               batch_size=batch_size, shuffle=False, num_workers=0),
+            'tests': [(d, DataLoader(v, batch_size=batch_size, shuffle=False, num_workers=0))
+                      for d, v in zip(('CIFAR10', 'STL10'), views['test'][0])]})
+    return entries
 
 
 def get_split_cache_path(DATA_ROOT, dataset_name, alpha, total_clients, num_new_clients, seed):
@@ -280,7 +362,11 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
 
     # Partition Datasets
     print(f"{'='*100}")
-    print(f"Loading Datasets with Non-IID Split (Dirichlet distribution, Alpha={dirichlet_alpha})")
+    if getattr(args, 'class_subsets', None):
+        print(f"Loading Datasets with label split ({args.class_subsets} classes per client, "
+              f"class share {getattr(args, 'class_share', 'split')})")
+    else:
+        print(f"Loading Datasets with Non-IID Split (Dirichlet distribution, Alpha={dirichlet_alpha})")
     print(f"{'='*100}")
 
     all_client_data_loaders = {}
@@ -289,6 +375,7 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
     usps_label_mapping = None
 
     n_loaded = 0                     # class-subset seed offset: the k-th loaded dataset draws its own
+    mixed = getattr(args, 'num_train_cifar10stl10', 0)            # CIFAR-10 + STL-10 special clients
     for d_name, n_clients in dataset_configs.items():   # subsets (the first keeps args.seed, as before)
         if n_clients == 0:
             continue
@@ -354,8 +441,12 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
             own, train_idcs, test_idcs = partition_even(train_labels, test_labels, n_clients, sub_seed, full=full)
         elif subsets:                                                  # deterministic from the seed)
             lo, hi = map(int, subsets.split(','))
+            cover0 = None                                              # special clients count as holders
+            if mixed and d_name in ('CIFAR10', 'STL10'):
+                picked = sum(mixed_choice(mixed, lo, hi, args.seed + 7777777, DATA_ROOT), [])
+                cover0 = [picked.count(x) for x in class_names]
             own, train_idcs, test_idcs = partition_class_subsets(train_labels, test_labels, n_clients, lo, hi,
-                                                                 sub_seed, full=full)
+                                                                 sub_seed, full=full, cover0=cover0)
         if subsets:
             names = list(class_names)                                  # readable names ('3', not '3 - three')
             client_loaders = []
@@ -467,6 +558,14 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
             shuffle=False, 
             num_workers=0
         )
+
+    if mixed:
+        if args.num_new_clients:
+            raise ValueError('--num-train-cifar10stl10 does not support --num-new-clients')
+        subsets = getattr(args, 'class_subsets', None)
+        lo, hi = map(int, subsets.split(',')) if subsets and subsets != 'even' else (3, 4)
+        all_client_data_loaders['CIFAR10+STL10'] = mixed_cifar_stl_clients(
+            mixed, lo, hi, args.seed + 7777777, DATA_ROOT, batch_size)
 
     print(f"{'='*100}\n")
 

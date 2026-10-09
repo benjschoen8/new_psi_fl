@@ -309,6 +309,14 @@ def load_trunk(g, state):
     g.load_state_dict(sd)
 
 
+def _compact(a):
+    """float32 copy when that is exact (the model's own weights are float32), else float64: the update
+    -(local - ref) is computed in float64 either way, so the numbers do not change; half the memory."""
+    a = np.asarray(a, np.float64)
+    b = a.astype(np.float32)
+    return b if np.array_equal(b, a) else a.copy()
+
+
 class ClientCBNGAN:
     """One client: its own generator (shared trunk + its labels' rows) and a private local D."""
 
@@ -349,12 +357,12 @@ class ClientCBNGAN:
         """trunk: global trunk state; own_rows: this client's rows (local label order)."""
         load_trunk(self.G, trunk)
         set_rows(self.G, own_rows)
-        self._ref = (flatten(trunk_state(self.G))[0], rows(self.G))
+        self._ref = (_compact(flatten(trunk_state(self.G))[0]), _compact(rows(self.G)))
 
     def rebase(self, trunk_flat: np.ndarray, own_rows: np.ndarray):
         """Keep the (pretrained) weights; the next update() is measured from this global state
         (used after the union: own_rows = the public initial rows of this client's union indices)."""
-        self._ref = (np.asarray(trunk_flat, np.float64).copy(), np.asarray(own_rows, np.float64).copy())
+        self._ref = (_compact(trunk_flat), _compact(own_rows))
 
     def train(self, loader) -> dict:
         """Returns {local label: samples seen} (first epoch)."""
@@ -462,10 +470,13 @@ class ClientCBNGAN:
             p.requires_grad_(False)
         self.guide, self.guide_weight = classifier, float(weight)
 
-    def update(self):
-        """-(local - global) for the trunk and for every own row."""
-        t, r = flatten(trunk_state(self.G))[0], rows(self.G)
-        return -(t - self._ref[0]), -(r - self._ref[1])
+    def update(self, keep=None):
+        """-(local - global) for the trunk and for every own row; keep = (trunk indices, row indices): only
+        those coordinates (the ones uploaded this round), same values."""
+        t, r, (t0, r0) = flatten(trunk_state(self.G))[0], rows(self.G), self._ref
+        if keep is not None:
+            t, r, t0, r0 = t[keep[0]], r[:, keep[1]], t0[keep[0]], r0[:, keep[1]]
+        return -(t - t0.astype(np.float64)), -(r - r0.astype(np.float64))
 
     def state_dict(self) -> dict:
         return dict(G=self.G.state_dict(), D=self.D.state_dict(), g_opt=self.g_opt.state_dict(),

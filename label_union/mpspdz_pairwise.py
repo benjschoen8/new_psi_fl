@@ -34,6 +34,7 @@ SOURCES = Path(__file__).resolve().parent.parent / 'mpc'
 # hegc: HE inner products (pair_inner.mpc on hemi) + garbled comparisons (pair_gc.mpc on yao);
 # simhash: garbled SimHash test (pair_gc.mpc only). Both give XOR shares (grouping version 2).
 PAIR_PROTOCOLS = ('semi', 'hemi', 'hegc', 'simhash')
+GC_BINARIES = {'yao': 'yao-party.x', 'semi-bin': 'semi-bin-party.x'}   # binary 2PC of pair_gc.mpc
 SYM_BITS = 8                        # garbled symbol test: character code of a one-letter keyword
 
 
@@ -120,6 +121,18 @@ def _parse_private(path, marker, count):
     return [values[i] for i in range(count)]
 
 
+def _parse_vector(path, marker, count):
+    """One private output line '<marker> [v0, v1, ...]' with count integers."""
+    try:
+        found = re.search(rf'^{marker} \[([^\]]*)\]$', Path(path).read_text(), re.M)
+        values = [int(v) for v in found.group(1).split(',')]
+        if len(values) != count or not all(-PRIME < v < PRIME for v in values):
+            raise ValueError
+    except (OSError, ValueError, AttributeError):
+        raise RuntimeError('invalid or incomplete MPC private output') from None
+    return values
+
+
 def _bridge_inputs(n, m, pairs, prefix):
     streams = []
     try:
@@ -169,13 +182,14 @@ def _compile(home, source, args, edabit, timeout, flags=None):
 
 
 def _run_session(*args, **kwargs):
-    # A party sometimes cannot bind its port (another process or TIME_WAIT): rerun the same
-    # session on fresh ports. Rerunning recomputes the same outputs from the same inputs.
+    # Local start-up races (a port still bound, a refused connection) occasionally make a party
+    # exit: rerun the same session on fresh ports; it recomputes the same outputs from the same
+    # inputs. A persistent failure still raises after three attempts; timeouts/cancels never retry.
     for attempt in range(3):
         try:
             return _run_session_once(*args, **kwargs)
         except MPCSessionError as error:
-            if 'Address already in use' not in str(error) or attempt == 2:
+            if attempt == 2 or 'timed out' in str(error) or 'cancelled' in str(error):
                 raise
 
 
@@ -191,10 +205,11 @@ def _run_session_once(home, binary, n, program, input_prefix, output_prefix, log
             log = open(f'{log_prefix}-P{p}', 'w+', encoding='utf8',
                        opener=lambda p, flags: os.open(p, flags, 0o600))
             logs.append(log)
-            garbled = Path(binary).name == 'yao-party.x'       # two parties, binary circuits: no -N/-P
+            name = Path(binary).name                   # binary circuits: no -P; yao: two parties, no -N
             processes.append(subprocess.Popen(
-                [str(binary), *([] if garbled else ['-N', str(n)]), '-p', str(p), '-pn', str(base), '-h', '127.0.0.1',
-                 *([] if garbled else ['-P', str(prime)]), '-IF', str(input_prefix), '-OF', str(output_prefix), program],
+                [str(binary), *([] if name == 'yao-party.x' else ['-N', str(n)]), '-p', str(p), '-pn', str(base),
+                 '-h', '127.0.0.1', *([] if name in GC_BINARIES.values() else ['-P', str(prime)]),
+                 '-IF', str(input_prefix), '-OF', str(output_prefix), program],
                 cwd=home, stdout=log, stderr=subprocess.STDOUT))
         while True:
             if cancel is not None and cancel.is_set():
@@ -222,14 +237,19 @@ def _run_session_once(home, binary, n, program, input_prefix, output_prefix, log
             if time.monotonic() - start > timeout:
                 raise MPCSessionError(f'MPC session timed out after {timeout:g} seconds in stage={Path(log_prefix).name}')
             time.sleep(.02)
-        logs[0].seek(0)
-        log0 = logs[0].read()
-        def number(pattern):
-            found = re.search(pattern, log0)
+        texts = []
+        for log in logs:
+            log.seek(0)
+            texts.append(log.read())
+        def number(pattern, text=texts[0]):
+            found = re.search(pattern, text)
             return float(found.group(1)) if found else None
+        sent = r'Data sent = ([\d.e+-]+) MB in ~\d+ rounds'           # each party: its own traffic and rounds
         return dict(wall_seconds=time.monotonic() - start,
                     global_MB=number(r'Global data sent = ([\d.e+-]+) MB'),
-                    time_seconds=number(r'Time = ([\d.e+-]+) seconds'))
+                    time_seconds=number(r'Time = ([\d.e+-]+) seconds'),
+                    party_MB=[number(sent, t) or 0. for t in texts],
+                    party_rounds=[number(r'Data sent = [\d.e+-]+ MB in ~(\d+) rounds', t) or 0. for t in texts])
     finally:
         for process in processes:
             if process.poll() is None:
@@ -245,17 +265,36 @@ def _run_session_once(home, binary, n, program, input_prefix, output_prefix, log
         _release_ports(base, n)
 
 
+def _mpc_max(home, counts, protocol, prime, timeout):
+    """Each client inputs its label count to an n-party MPC; returns (max, public stats)."""
+    n = len(counts)
+    program, compile_s, _ = _compile(home, SOURCES / 'label_max.mpc', [f'n={n}', 'bits=16'], False, timeout)
+    (home / 'Player-Data').mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='padmax-', dir=home / 'Player-Data') as directory:
+        work = Path(directory)
+        for p, count in enumerate(counts):
+            _private_write(Path(f'{work}/in-P{p}-0'), [count])
+        stats = _run_session(home, home / f'{protocol}-party.x', n, program, work / 'in', work / 'out',
+                             work / 'log', timeout, prime=prime)
+        found = re.search(r'^M (\d+)$', Path(f'{work}/out-P0-0').read_text(), re.M)
+    if not found:
+        raise RuntimeError('invalid or incomplete MPC output')
+    stats.update(compile_seconds=compile_s)
+    return int(found.group(1)), stats
+
+
 def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
                          timeout=600, pair_concurrency=2, pair_workers=4,
                          edabit=True, prefix='parallel', block_rows=64, group_edabit=False,
                          group_version=1, group_protocol='shamir', pair_protocol='semi',
-                         simhash_bits=256, simhash_u0=1.0):
+                         simhash_bits=256, simhash_u0=1.0, gc_protocol='yao', pad_max='plain'):
     if (not rows or len(rows) != len(owners) or any(not isinstance(p, int) or p < 0 for p in owners)
             or fix != 7 or prefix not in ('serial', 'parallel')
             or not isinstance(block_rows, int) or block_rows < 1
             or group_version not in (1, 2) or group_protocol not in ('shamir', 'atlas')
             or pair_protocol not in PAIR_PROTOCOLS
-            or (pair_protocol in ('hegc', 'simhash') and group_version != 2)
+            or (pair_protocol in ('hegc', 'simhash') and group_version != 2) or gc_protocol not in GC_BINARIES
+            or pad_max not in ('plain', 'mpc')
             or not isinstance(simhash_bits, int) or simhash_bits < 64 or simhash_bits % 64
             or pair_concurrency < 1 or pair_workers < 1 or not math.isfinite(timeout) or timeout <= 0):
         raise ValueError('invalid hybrid MPC inputs or options')
@@ -263,8 +302,9 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
     if n < 3 or set(owners) != set(range(n)):
         raise ValueError('global Shamir grouping requires at least three nonempty clients')
     per = [[i for i, owner in enumerate(owners) if owner == p] for p in range(n)]
-    m = max(map(len, per)) if m is None else m
-    if not isinstance(m, int) or m < max(map(len, per)):
+    if m is None and pad_max == 'plain':
+        m = max(map(len, per))
+    if m is not None and (not isinstance(m, int) or m < max(map(len, per))):
         raise ValueError('padding must accommodate every client')
     fuzzy = all(kw[0] != 'name' for kw, _ in rows)
     if not fuzzy and any(kw[0] != 'name' for kw, _ in rows):
@@ -281,11 +321,14 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
     kw_mode = ('eq' if not fuzzy else 'masked' if pair_protocol == 'hegc' else 'simhash') if garbled else None
     home = Path(root or os.environ.get('MPSPDZ', '')).expanduser().resolve()
     prime = PRIME_NTT if pair_protocol == 'hemi' else PRIME     # both stages share one field
-    pair_binaries = (['yao-party.x'] + (['hemi-party.x'] if kw_mode == 'masked' else [])
+    pair_binaries = ([GC_BINARIES[gc_protocol]] + (['hemi-party.x'] if kw_mode == 'masked' else [])
                      if garbled else [f'{pair_protocol}-party.x'])
     for name in ('compile.py', *pair_binaries, f'{group_protocol}-party.x'):
         if not (home / name).is_file():
             raise RuntimeError(f'MP-SPDZ hybrid backend requires {name}; set MPSPDZ to a complete installation')
+    pad_stats = None
+    if m is None:                       # pad_max='mpc': only the largest label count is opened
+        m, pad_stats = _mpc_max(home, [len(own) for own in per], group_protocol, prime, timeout)
     args = [f'm={m}', f'd={d if fuzzy else 0}', f'nimg={nimg}', f'tau={round(tau * (1 << (2 * fix)))}',
             f't={t}', f"mode={'fuzzy' if fuzzy else 'exact'}", f'sym={sym}']
     tau_i = round(tau * (1 << (2 * fix)))
@@ -297,7 +340,8 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
         C = sh.threshold(tau, simhash_bits, sh.SCALE, simhash_u0)[1]
         pair_program, pair_compile, pair_cached = _compile(home, SOURCES / 'pair_gc.mpc',
             [f'm={m}', f'kw={kw_mode}', f'nimg={nimg}', f't={t}', f'L={GC_L}', f'k={simhash_bits}',
-             f'S={sh.SCALE}', f'C={C}', f'G={sh.G_BITS}', f'sym={sym}', f'sb={SYM_BITS}'], False, timeout, flags=['-G', '-B', '64'])
+             f'S={sh.SCALE}', f'C={C}', f'G={sh.G_BITS}', f'sym={sym}', f'sb={SYM_BITS}'], False, timeout,
+            flags=(['-G'] if gc_protocol == 'yao' else []) + ['-B', '64'])
         if kw_mode == 'masked':
             inner_program, inner_compile, inner_cached = _compile(home, SOURCES / 'pair_inner.mpc',
                 [f'm={m}', f'd={d}'], False, timeout, flags=['-F', '40'])
@@ -338,7 +382,7 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
         lock = threading.Lock()
         cancel = threading.Event()
         active = peak = 0
-        pair_outputs, pair_stats = {}, []
+        pair_outputs, pair_stats, pair_party = {}, [], {}
 
         def matching(pair):
             nonlocal active, peak
@@ -377,14 +421,14 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
                 _private_write(Path(f'{inp}-P1-0'), tokens[q][1] + rho)
                 he_stats = _run_session(home, home / 'hemi-party.x', 2, inner_program, inp, out,
                                         Path(f'{stem}-HE-Log'), timeout, cancel=cancel, prime=PRIME_HE)
-                x = _parse_private(Path(f'{out}-P0-0'), 'X', entries)
+                x = _parse_vector(Path(f'{out}-P0-0'), 'X', entries)
                 gc[0] += [v % (1 << GC_L) for v in x]
                 gc[1] += [(r + tau_i) % (1 << GC_L) for r in rho]
             gc = [gc[0] + tokens[p][2], gc[1] + tokens[q][2]]
             inp, out = Path(f'{stem}-Input'), Path(f'{stem}-Output')
             for party in range(2):
                 _private_write(Path(f'{inp}-P{party}-0'), gc[party] + z[party])
-            stats = _run_session(home, home / 'yao-party.x', 2, pair_program, inp, out,
+            stats = _run_session(home, home / GC_BINARIES[gc_protocol], 2, pair_program, inp, out,
                                  Path(f'{stem}-Log'), timeout, cancel=cancel)
             found = re.search(r'^W (-?\d+)$', Path(f'{out}-P0-0').read_text(), re.M)
             if not found:
@@ -397,6 +441,8 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
                     stream.writelines(f'S {e} {v}\n' for e, v in enumerate(share))
             stats['gc_MB'] = stats['global_MB']
             if he_stats is not None:
+                for key in ('party_MB', 'party_rounds'):                  # both sessions of the pair
+                    stats[key] = [a + b for a, b in zip(stats[key], he_stats[key])]
                 stats['he_MB'] = he_stats['global_MB']
                 stats['wall_seconds'] += he_stats['wall_seconds']
                 stats['global_MB'] = (None if None in (stats['global_MB'], he_stats['global_MB'])
@@ -412,6 +458,7 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
                         pair, paths, stats = future.result()
                         pair_outputs[pair] = paths
                         pair_stats.append(stats)
+                        pair_party[pair] = stats
                 except BaseException:
                     cancel.set()
                     for future in futures:
@@ -433,13 +480,33 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
         steps = re.search(r'propagation steps \(incl\. the public first step\): (\d+)', output0)
     first = {}
     roots = [first.setdefault(key, i) for i, key in enumerate(keys)]
+    # per client: own traffic sent in every session it is a party of, traffic received from the other
+    # party (pairs) or an even part of the others' traffic (n-party sessions), and rounds (summed over its
+    # sessions; pair sessions divided by pair_concurrency, the partners a client runs at once)
+    sent, recv, rounds = [0.] * n, [0.] * n, [0.] * n
+    for (p, q), st in pair_party.items():
+        for side, (me, other) in enumerate(((p, 1), (q, 0))):
+            sent[me] += st['party_MB'][side]
+            recv[me] += st['party_MB'][other]
+            rounds[me] += st['party_rounds'][side] / pair_concurrency    # its pairs run concurrently
+    for st in (graph, pad_stats):
+        if st is None:
+            continue
+        total = sum(st['party_MB'])
+        for c in range(n):
+            sent[c] += st['party_MB'][c]
+            recv[c] += (total - st['party_MB'][c]) / (n - 1)
+            rounds[c] += st['party_rounds'][c]
     volumes = [stats['global_MB'] for stats in pair_stats]
     pair_mb = sum(volumes) if all(value is not None for value in volumes) else None
     total_mb = pair_mb + graph['global_MB'] if pair_mb is not None and graph['global_MB'] is not None else None
-    stats = dict(backend='pairwise', n=n, m=m, rows=n*m, d=d if fuzzy else 0, nimg=nimg,
+    stats = dict(backend='pairwise', client_sent_MB=sent, client_received_MB=recv, client_rounds=rounds,
+                 n=n, m=m, rows=n*m, d=d if fuzzy else 0, nimg=nimg,
                  mode='fuzzy' if fuzzy else 'exact', sym=sym, prefix=prefix, block_rows=min(n*m, block_rows), edabit=edabit,
                  group_edabit=group_edabit, group_version=group_version, group_protocol=group_protocol,
-                 pair_protocol=pair_protocol, pair_kw=kw_mode,
+                 pad_max=pad_max, pad_max_MB=pad_stats and pad_stats['global_MB'],
+                 pad_max_seconds=pad_stats and pad_stats['wall_seconds'],
+                 pair_protocol=pair_protocol, pair_kw=kw_mode, gc_protocol=gc_protocol if garbled else None,
                  simhash_bits=simhash_bits if kw_mode == 'simhash' else None,
                  simhash_u0=simhash_u0 if kw_mode == 'simhash' else None,
                  pair_he_MB=sum(st.get('he_MB') or 0 for st in pair_stats) if kw_mode == 'masked' else None,

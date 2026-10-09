@@ -30,7 +30,7 @@ class SetupSmokeTests(unittest.TestCase):
         self.assertEqual(union.call_args.kwargs['mpc_options'],
                          {'pair_concurrency': 2, 'pair_workers': 4, 'timeout': 90,
                           'prefix': 'parallel', 'block_rows': 64, 'group_edabit': False,
-                          'group_version': 1, 'group_protocol': 'shamir', 'pair_protocol': 'semi'})
+                          'group_version': 1, 'group_protocol': 'shamir', 'pair_protocol': 'semi', 'pad_max': 'plain'})
         self.assertEqual(result['backend'], 'mp-spdz-pairwise')
         self.assertEqual(result['mpc_mode'], 'pairwise')
         self.assertEqual(result['pair_sessions'], 3)
@@ -150,3 +150,43 @@ class GarbledOptionTests(unittest.TestCase):
                                          pair_protocol='simhash', group_version=2, pca_dim=64, simhash_bits=128)
         options = calls[0]['mpc_options']
         self.assertEqual((options['pair_protocol'], options['simhash_bits'], options['pca_dim']), ('simhash', 128, 64))
+
+
+class SetupCommTests(unittest.TestCase):
+    def test_model_adds_mpc_and_union_traffic(self):
+        row = dict(clients=2, mpc_measured=dict(client_sent_MB=[1., 3.], client_received_MB=[3., 1.],
+                                                client_rounds=[10, 20]),
+                   secagg_accounted_bytes=dict(payload_up=2e6, control_up=0, control_down=2e6))
+        out = setup_smoke_hybrid.setup_comm(row, mbps=8., rtt_ms=100.)
+        self.assertAlmostEqual(out['comm_MB_per_client_mean'], 6.)           # 4 MPC + 1 up + 1 down
+        self.assertAlmostEqual(out['comm_seconds_model_max'], 6. + 2.3)      # 6 MB at 1 MB/s, 23 rounds
+
+
+class UnionQualityTests(unittest.TestCase):
+    def test_pair_mcc(self):
+        labels = [['0', 'cat'], ['0', 'dog'], ['cat']]
+        good = [{'0': 0, 'cat': 1}, {'0': 0, 'dog': 2}, {'cat': 1}]
+        bad = [{'0': 0, 'cat': 1}, {'0': 0, 'dog': 1}, {'cat': 1}]          # dog merged with cat
+        self.assertEqual(setup_smoke_hybrid.union_quality(labels, good, 3)['pair_mcc'], 1.)
+        q = setup_smoke_hybrid.union_quality(labels, bad, 2)
+        self.assertLess(q['pair_mcc'], 1.)
+        self.assertEqual((q['pair_fp'], q['union_exact']), (2, False))
+
+
+class MpcModelTests(unittest.TestCase):
+    def test_model_matches_fit_points_and_runs_without_mpspdz(self):
+        from label_union import mpc_model
+        self.assertLess(abs(mpc_model.he(62, 64)[0] - 73.2) / 73.2, .05)
+        self.assertLess(abs(mpc_model.group(10, 62, 1)[0] * 10 - 495) / 495, .1)
+        est = mpc_model.estimate(10, 62, 48, 45, 1)
+        self.assertAlmostEqual(sum(est['client_sent_MB']), est['global_MB'], delta=1e-6 * est['global_MB'])
+        with tempfile.TemporaryDirectory() as out, patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('MPSPDZ', None)
+            with contextlib.redirect_stdout(io.StringIO()):
+                setup_smoke_hybrid.main(['--data', 'synthetic', '--clients', '3', '--labels', '4', '--methods', 'exact',
+                                         '--pair-protocol', 'hegc', '--group-protocol', 'atlas', '--mpc-model',
+                                         '--out', out])
+            row = json.loads((Path(out) / 'setup.json').read_text())['results'][0]
+        self.assertEqual(row['backend'], 'mpc-model')
+        self.assertGreater(row['setup_total_seconds_model'], row['comm_seconds_model_max'])
+        self.assertEqual(row['pair_mcc'], 1.)

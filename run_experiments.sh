@@ -47,10 +47,14 @@ EXTRA=${EXTRA:-}                   # extra CLI flags for every run, e.g. EXTRA="
 GEN=${GEN:-perlabel}               # perlabel (default): one whole DCGAN per label; cbn: trunk + CBN rows
 [[ $GEN == cbn ]] && EXTRA="--no-per-label-gen $EXTRA"
 [[ -n ${GEN_WIDTHS:-} ]] && EXTRA="--gen-widths $GEN_WIDTHS $EXTRA"   # per-label DCGAN widths (default 128,64,32)
+[[ -n ${GUIDE_EPOCHS:-} ]] && EXTRA="--guide-epochs $GUIDE_EPOCHS $EXTRA"
+[[ -n ${GUIDE_WEIGHT:-} ]] && EXTRA="--guide-weight $GUIDE_WEIGHT $EXTRA"
 # clients: one per dataset (MNIST, EMNIST, CIFAR-10); most labels then have one holder, so a row is
 # updated from a single client (--min-holders 1). emnist10_run_experiments.sh sets its own DATA.
 DATA=${DATA:---num-train-mnist 1 --num-train-emnist 1 --num-train-cifar10 1 --min-holders 1}
-PHASES=${PHASES:-1 2 3 4}
+PHASES=${PHASES:-1 3 4}            # phase 2 only on request: phase 1 records aggregation / distribution
+                                    # time and size per round (comm_summary.json, phase 4 table)
+METHODS=${METHODS:-plain similar}   # phase 1 runs; also: similar (= fuzzy, run name ours_similar)
 # MPC=1 (default): circuit-PSI grouping as a real MPC in MP-SPDZ, downloaded once to third_party/ by
 # get_mpspdz.sh; measured cost in the union stats. MPC=0, or no x86-64 Linux: ideal functionality + estimate.
 if [[ ${MPC:-1} == 1 && -z ${MPSPDZ:-} ]]; then
@@ -141,9 +145,19 @@ fails=0
 has() { [[ " $PHASES " == *" $1 "* ]]; }
 RUN_GPU=${GPU_LIST[0]:-}                                   # single runs: first GPU
 if has 1; then
-say "phase 1: accuracy ($ROUNDS rounds, plain + ours + ours_fuzzy $([[ $SEQ == 1 ]] && echo "one at a time" || echo "in parallel"))"
+say "phase 1: accuracy ($ROUNDS rounds, $METHODS $([[ $SEQ == 1 ]] && echo "one at a time" || echo "in parallel"))"
 # GPUS="0 1" puts plain + ours_fuzzy on GPU 0, ours on GPU 1
-group "plain $ROUNDS $WORKERS --agg plain" "ours $ROUNDS $WORKERS" "ours_fuzzy $ROUNDS $WORKERS --union fuzzy" || fails=1
+specs=()
+for m in $METHODS; do
+    case $m in
+        plain) specs+=("plain $ROUNDS $WORKERS --agg plain") ;;
+        ours) specs+=("ours $ROUNDS $WORKERS") ;;
+        ours_fuzzy) specs+=("ours_fuzzy $ROUNDS $WORKERS --union fuzzy") ;;
+        similar) specs+=("ours_similar $ROUNDS $WORKERS --union similar") ;;
+        *) echo "METHODS: unknown $m" >&2; exit 1 ;;
+    esac
+done
+group "${specs[@]}" || fails=1
 fi
 
 if has 2; then
@@ -176,8 +190,9 @@ plot() {  # plot <out name> <run:label>...
     $PY -m tests.plot_paper --runs "${runs[@]}" --labels "${labels[@]}" --out "$OUT/figs/$name" \
         >> "$OUT/logs/plots.log" 2>&1 && say "      $OUT/figs/$name/paper.{png,pdf,csv}"
 }
-plot accuracy "plain:Plain-GeFL" "ours:Ours (exact PSI)" "ours_fuzzy:Ours (fuzzy PSI)"
-plot cost "time_plain:Plain-GeFL" "time_ours_noq:Ours (uncompressed)" "time_ours:Ours (exact PSI)" "time_ours_fuzzy:Ours (fuzzy PSI)"
+[[ " $METHODS " == *" ours "* ]] && plot accuracy "plain:Plain-GeFL" "ours:Ours (exact PSI)" "ours_fuzzy:Ours (fuzzy PSI)"
+[[ " $METHODS " == *" similar "* ]] && plot accuracy_similar "plain:Plain-GeFL" "ours_similar:Ours (similar)"
+[[ -d $OUT/time_plain ]] && plot cost "time_plain:Plain-GeFL" "time_ours_noq:Ours (uncompressed)" "time_ours:Ours (exact PSI)" "time_ours_fuzzy:Ours (fuzzy PSI)"
 if [[ $ABLATIONS == 1 ]]; then
     plot keep_frac "ours_k0.5:keep 0.5" "ours_k0.2:keep 0.2" "ours:keep 0.1" "ours_k0.05:keep 0.05"
     plot min_holders "ours_t1:t = 1" "ours:t = 2"
@@ -208,6 +223,25 @@ for d in sorted(p for p in out.iterdir() if (p / 'metrics.jsonl').exists()):
         names = tail[-1]['evaluation']['by_dataset']
         print(' ' * 16 + '  '.join(f"{k} {sum(r['evaluation']['by_dataset'][k]['accuracy'] for r in tail) / len(tail):.4f}"
                                    for k in names) + f"  (mean of last {len(tail)} rounds)")
+EOF
+# per-round communication of the phase 1 runs (rounds 2..): aggregation = after local training until the
+# aggregator holds the aggregate (upload), distribution = aggregate to the row holders (download);
+# s = measured compute (all clients in one process) + one client's bytes at NET_MBPS
+NET_MBPS=${NET_MBPS:-100} $PY - "$OUT" <<'EOF' | tee -a "$OUT/progress.log"
+import json, os, sys
+from pathlib import Path
+bps = float(os.environ['NET_MBPS']) * 1e6 / 8
+print(f"\nper round (rounds 2.., {bps * 8 / 1e6:g} Mbit/s)   aggregation: kB/client  compute s  total s"
+      f"   distribution: kB/client  compute s  total s")
+for d in sorted(p for p in Path(sys.argv[1]).iterdir() if (p / 'metrics.jsonl').exists()):
+    rows = [json.loads(l) for l in (d / 'metrics.jsonl').read_text().splitlines() if l.strip().startswith('{')]
+    rows = rows[1:] or rows
+    if not rows:
+        continue
+    m = lambda f: sum(map(f, rows)) / len(rows)
+    up, down = m(lambda r: r['bytes'].get('upload_per_client', r['bytes']['upload'])), m(lambda r: r['bytes']['download_per_client'])
+    ca, cd = m(lambda r: r['seconds']['aggregation']), m(lambda r: r['seconds']['downlink'])
+    print(f"{d.name:<35}{up / 1e3:>11.1f}{ca:>11.2f}{ca + up / bps:>9.2f}{down / 1e3:>25.1f}{cd:>11.2f}{cd + down / bps:>9.2f}")
 EOF
 
 fi

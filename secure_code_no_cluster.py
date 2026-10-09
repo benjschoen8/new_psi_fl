@@ -374,6 +374,32 @@ def subsample(loader, n, seed, shuffle=False):
     return DataLoader(Subset(ds, idx), batch_size=loader.batch_size, shuffle=shuffle)
 
 
+def comm_summary(history, n_clients, mbps):
+    """Average per-round communication, rounds 2.. (round 1 has no downlink), split in two phases:
+    aggregation  = after local training until the aggregator holds the aggregate (clients encode + mask,
+                   upload, SecAgg unmask / plain sum, decode + model update), upload bytes
+    distribution = aggregate to the clients that hold each row (KEM-wrapped rows / plain rows), download
+    Seconds: measured compute on this host (all clients simulated in one process) + transfer of one
+    client's bytes at `mbps`. Any run: --comm-only (no training) or a training run (phase 1)."""
+    rows = history[1:] or history
+    mean = lambda f: float(np.mean([f(r) for r in rows]))
+    up = mean(lambda r: r['bytes'].get('upload_per_client', r['bytes']['upload']))
+    down = mean(lambda r: r['bytes']['download_per_client'])
+    bps = mbps * 1e6 / 8
+    agg_s, dist_s = mean(lambda r: r['seconds']['aggregation']), mean(lambda r: r['seconds']['downlink'])
+    return dict(clients=n_clients, rounds_averaged=len(rows), net_mbps=mbps,
+                aggregation=dict(bytes_per_client=up, bytes_total=mean(lambda r: r['bytes']['upload']),
+                                 compute_seconds=agg_s, transfer_seconds=up / bps, seconds=agg_s + up / bps),
+                distribution=dict(bytes_per_client=down, broadcast_bytes=mean(lambda r: r['bytes'].get('broadcast', 0)),
+                                  compute_seconds=dist_s, transfer_seconds=down / bps, seconds=dist_s + down / bps),
+                # flat keys of the first version (scale_experiments.sh comm summary)
+                upload_bytes_per_client=up, download_bytes_per_client=down,
+                broadcast_bytes=mean(lambda r: r['bytes'].get('broadcast', 0)),
+                upload_bytes_total=mean(lambda r: r['bytes']['upload']),
+                downlink_seconds=dist_s, aggregation_seconds=agg_s, compute_seconds=agg_s + dist_s,
+                transfer_seconds_per_client=(up + down) / bps)
+
+
 def main():
     from setup import parser as base_parser, seed_all, build_clients
     from omegaconf import OmegaConf
@@ -397,12 +423,18 @@ def main():
                    help='cbn, image side of the union: k,t = a label is described by its k nearest public image '
                         'anchors and two labels with the same keyword match if they share >= t (t-out-of-k); '
                         'off: one coarse image code (strokes / photo) per label')
-    p.add_argument('--union', choices=('oprf', 'fuzzy', 'mpc', 'secagg'), default='oprf',
+    p.add_argument('--union', choices=('oprf', 'fuzzy', 'similar', 'mpc', 'secagg'), default='oprf',
                    help='label union: oprf = PSI-style n-party OPRF tags + SecAgg on the label names (default); '
                         'fuzzy = no shared names: every client names its labels with its own keyword in its own language '
                         '(--fuzzy-langs), snapped locally to public anchor classes by a cross-lingual encoder, then exact union (label_union.fuzzy_union; '
                         'parameters from tests/fuzzy_threshold.py); mpc = clients-only MPC over the dictionary; '
-                        'secagg = indicator vectors (Aggregator also learns names and holder counts)')
+                        'secagg = indicator vectors (Aggregator also learns names and holder counts); '
+                        'similar = new name of fuzzy (same method)')
+    p.add_argument('--comm-only', action='store_true',
+                   help='per-round communication benchmark (--gen cbn): no training, no evaluation; every client '
+                        'uploads a random update of the real shapes; prints averages over rounds 2.. (comm_summary.json)')
+    p.add_argument('--net-mbps', type=float, default=100.,
+                   help='--comm-only: link speed for the modelled transfer time per client (default 100 Mbit/s)')
     p.add_argument('--fuzzy-langs', default='en0,en1',
                    help='--union fuzzy: client i writes its label keywords as writer i mod len (en0,en1 = English, '
                         'word / Capitalised word; or en,zh,es,ja,fr,de; rt_descriptions.keyword)')
@@ -455,6 +487,10 @@ def main():
     p.add_argument('--quant-scale0', type=float, default=0.05, help='cbn: first-round scale floor (plain and secagg)')
     p.add_argument('--fast-samples', type=int, default=256, help='per-client image cap under --fast')
     args = p.parse_args()
+    if args.union == 'similar':
+        args.union = 'fuzzy'
+    if args.comm_only:                                                # nothing trained: no guide, warm-up,
+        args.heter, args.warmup_epochs, args.save_every, args.client_procs = False, 0, 0, 'off'   # checkpoints
     old = args.resume.parent / 'args.json' if args.resume else None   # a resumed run keeps its own settings
     old = json.loads(old.read_text()) if old and old.exists() else {}
     if args.gen_widths is None:
@@ -546,6 +582,11 @@ def main():
         um = row.get('union_metrics')
         per = row['bytes'].get('upload_per_client', row['bytes']['upload'])
         by = row.get('evaluation', {}).get('by_dataset', {})
+        if row['accuracy'] is None:                                   # --comm-only
+            tqdm.write(f"Round {row['round']}: upload/client={per / 1e3:.1f}kB "
+                       f"download/client={row['bytes']['download_per_client'] / 1e3:.1f}kB "
+                       f"downlink {row['seconds']['downlink']:.2f}s aggregation {row['seconds']['aggregation']:.2f}s")
+            return
         tqdm.write(f"Round {row['round']}: acc={row['accuracy']:.4f} old_acc={row['old_acc']:.4f} "
                    + ''.join(f"{k}={v['accuracy']:.4f} " for k, v in by.items())
                    + (f"union exact={um['exact']} " if um else '')
@@ -574,7 +615,11 @@ def main():
                                 image_match=None if args.image_match == 'off' else
                                 tuple(int(v) for v in args.image_match.split(',')),
                                 label_psi=args.label_psi, circuit_tau=args.circuit_tau,
-                                diagnostics=args.diagnostics, **common)
+                                diagnostics=args.diagnostics, comm_only=args.comm_only, **common)
+        if result.get('history'):                                     # every run: aggregation / distribution
+            write_json(out / 'comm_summary.json', comm_summary(result['history'], len(clients), args.net_mbps))
+            if args.comm_only:
+                print(json.dumps(json.loads((out / 'comm_summary.json').read_text())))
     else:
         result = run(clients, spaces, tests, gen_f, disc_f, cls_f, config, dictionary, code_dim=code_dim,
                      union=args.union, **common)

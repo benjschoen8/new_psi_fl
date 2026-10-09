@@ -112,7 +112,7 @@ def build_clients(args, config):
                                   DCGANDiscriminator(len(names), img_size=32, channels=3),
                                   entry['train'], len(names), config, args.device))
             spaces[cid] = names
-            tests.append((name, cid, entry['test']))
+            tests += [(d, cid, l) for d, l in entry['tests']] if 'tests' in entry else [(name, cid, entry['test'])]
             metadata[cid] = dict(dataset=name, architecture=arch, labels=names,
                                  train_indices=[int(i) for i in entry['train'].dataset.indices],
                                  test_indices=[int(i) for i in entry['test'].dataset.indices])
@@ -140,6 +140,9 @@ def parser():
     for name in ('mnist', 'emnist', 'fashionmnist', 'cifar10', 'cifar100', 'usps', 'svhn', 'stl10'):
         p.add_argument(f'--num-train-{name}', f'--num_train_{name}', type=int,
                        default=10 if name in ('mnist', 'emnist', 'cifar10') else 0)
+    p.add_argument('--num-train-cifar10stl10', type=int, default=0,
+                   help='special clients holding CIFAR-10 and STL-10 together: LO..HI (--class-subsets, else 3..4) '
+                        'of the classes the two share, all images of both datasets merged per class name')
     p.add_argument('--class-subsets', metavar='LO,HI|even',
                    help='every client of a dataset holds LO..HI of its classes (even coverage, each class '
                         'split evenly among its holders) and knows only those labels; e.g. 8,20. '

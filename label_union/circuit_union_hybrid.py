@@ -22,15 +22,16 @@ def circuit_union_with_keys(client_labels, client_keywords, client_sets=None, fu
         return original.circuit_union_with_keys(client_labels, client_keywords, client_sets,
             fuzzy=fuzzy, tau=tau, t=t, D=D, m=m, workers=workers,
             bucket_bits=bucket_bits, session=session, secure=secure)
-    if not os.environ.get('MPSPDZ'):
-        raise RuntimeError('hybrid setup requires real MPC; set MPSPDZ to an installation')
+    model = bool((mpc_options or {}).get('model'))             # ideal grouping + MPC cost model, no MP-SPDZ
+    if not model and not os.environ.get('MPSPDZ'):
+        raise RuntimeError('hybrid setup requires real MPC; set MPSPDZ to an installation (or the cost model)')
     if len(client_labels) < 3 or any(not labels for labels in client_labels):
         raise ValueError('hybrid setup requires at least three nonempty clients')
     if D != 1:
         raise ValueError('hybrid grouping checks convergence after every propagation step (D=1)')
-    from label_union.mpspdz_pairwise import mpspdz_pairwise_group
     start = time.perf_counter()
     options = dict(mpc_options or {})
+    options.pop('model', None)
     pca_dim = options.pop('pca_dim', None)                   # public PCA of embeddings (new option)
     kws = [original.keyword_rows(keywords, fuzzy) for keywords in client_keywords]
     if pca_dim and fuzzy:
@@ -44,8 +45,21 @@ def circuit_union_with_keys(client_labels, client_keywords, client_sets=None, fu
             rows.append((kws[c][label], imgs[c][label] if imgs else None))
     # No plaintext graph/oracle is evaluated in a measured hybrid setup.
     # Correctness against the ideal functionality is checked in integration tests.
-    _, measured, keys = mpspdz_pairwise_group(rows, [c for c, _ in owners],
-        tau=tau, t=t, m=m, **options)
+    if model:
+        import secrets
+        from label_union import mpc_model
+        root, steps = original.group(rows, tau, t, [c for c, _ in owners])
+        kappa = {r: secrets.randbits(126) for r in set(root)}
+        keys = [kappa[r] for r in root]
+        embs = [kw[1] for kw, _ in rows if kw[0] == 'emb']
+        measured = mpc_model.estimate(len(client_labels), m or max(map(len, client_labels)),
+                                      len(embs[0]) if embs else 0, len(rows[0][1]) if imgs else 0, steps,
+                                      options.get('gc_protocol', 'semi-bin'), options.get('pair_concurrency', 2),
+                                      options.get('pair_workers', 8), options.get('pad_max', 'mpc'))
+    else:
+        from label_union.mpspdz_pairwise import mpspdz_pairwise_group
+        _, measured, keys = mpspdz_pairwise_group(rows, [c for c, _ in owners],
+            tau=tau, t=t, m=m, **options)
     measured['pca_dim'] = pca_dim if fuzzy else None
     K = [{} for _ in client_labels]
     for (c, label), key in zip(owners, keys):

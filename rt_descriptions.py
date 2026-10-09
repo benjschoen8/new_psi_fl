@@ -53,7 +53,10 @@ CIFAR_KW = {"en": "plane car bird cat deer dog frog horse ship truck",
 # English-only: two writers per class, keywords that match for sure (MCC 1.0 in calibration):
 # writer en0 types the plain word, en1 the capitalised word ("cat" / "Cat"); single letters as is.
 EN_WORDS = {"airplane": "airplane", "automobile": "car", "bird": "bird", "cat": "cat", "deer": "deer",
-            "dog": "dog", "frog": "frog", "horse": "horse", "ship": "ship", "truck": "truck"}
+            "dog": "dog", "frog": "frog", "horse": "horse", "ship": "ship", "truck": "truck",
+            # Fashion-MNIST: "T-shirt/top" and "Shirt" are near-synonyms to any text encoder (CSLS 0.50, above
+            # the 0.20 of an identical word), "Ankle boot" / "Sneaker" 0.10: the writer types "tee" and "boot"
+            "T-shirt/top": "tee", "Ankle boot": "boot"}
 
 
 # test-only synonym writers (tests.fuzzy_topk): 'syn0' / 'syn1' / 'syn2' name a class in different words

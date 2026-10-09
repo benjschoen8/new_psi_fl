@@ -70,20 +70,34 @@ def first_match_columns(columns, width, mode):
 
 Mu = sint.Matrix(N, N)
 Mu.assign_all(0)
-for a in range(N):
+
+
+@for_range(N)
+def _(a):
     Mu[a][a] = sint(1)
-for p in range(n):
-    for q in range(p + 1, n):
-        left = sint.get_input_from(p, size=m * m)
-        right = sint.get_input_from(q, size=m * m)
-        blk = sint.Matrix(m, m)
-        blk.assign_vector(left + right - 2 * left * right if xor else left + right)
-        blkT = blk.transpose()
-        for i in range(m):
-            Mu[p * m + i].assign_vector(blk[i].get_vector(), base=q * m)
-            Mu[q * m + i].assign_vector(blkT[i].get_vector(), base=p * m)
-        blk.delete()
-        blkT.delete()
+
+
+# One runtime loop over the client pairs: the registers of one pair's shares are reused, instead of
+# n(n-1)/2 compile-time copies (they dominated each party's memory: ~3 x the N x N matrix).
+pairs = [(p, q) for p in range(n) for q in range(p + 1, n)]
+PP, QQ = regint.Array(len(pairs)), regint.Array(len(pairs))
+PP.assign([p for p, _ in pairs])
+QQ.assign([q for _, q in pairs])
+blk = sint.Matrix(m, m)
+
+
+@for_range(len(pairs))
+def _(k):
+    p, q = PP[k], QQ[k]
+    left = sint.get_input_from(p, size=m * m)
+    right = sint.get_input_from(q, size=m * m)
+    blk.assign_vector(left + right - 2 * left * right if xor else left + right)
+    for i in range(m):
+        Mu[p * m + i].assign_vector(blk[i].get_vector(), base=q * m)
+        Mu[q * m + i].assign_vector(blk.get_column(i), base=p * m)
+
+
+blk.delete()
 
 # Min-label propagation, as in circuit_group.mpc. Joint random row secrets
 # are generated here, rather than adopted independently from pair sessions.
