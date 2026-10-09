@@ -18,7 +18,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 PY=${PY:-python}
-PARTS=${PARTS:-setup train comm}
+PARTS=${PARTS:-setup train comm}               # also: setup_full (all labels per client, not default)
 OUT=${OUT:-runs/scale}_$(date +%Y%m%d-%H%M)
 DEVICE=${DEVICE:-cuda}
 FIVE=MNIST,EMNIST,CIFAR10,FashionMNIST,STL10
@@ -33,18 +33,23 @@ echo "output folder: $OUT"
 has() { [[ " $PARTS " == *" $1 "* ]]; }
 fails=0
 
-if has setup; then                                   # the only part with MPC (real or modelled)
-    echo "[$(date '+%F %T')] setup: clients ${SETUP_CLIENTS:-7 10 30 50}"
+setup() {  # setup <name> <clients> <class subsets> <special clients>: the only part with MPC (real or modelled)
+    echo "[$(date '+%F %T')] $1: clients $2, classes per client $3, $4 special"
     # shellcheck disable=SC2086
     model=(--mpc-model); [[ ${SETUP_MPC:-model} == real ]] && model=()
-    $PY -m setup_smoke_hybrid "${model[@]}" --datasets "$FIVE" --clients ${SETUP_CLIENTS:-7 10 30 50} \
-        --class-subsets "${CLASS_SUBSETS:-5,6}" --class-share full --num-train-cifar10stl10 "${MIXED:-2}" \
+    $PY -m setup_smoke_hybrid "${model[@]}" --datasets "$FIVE" --clients $2 \
+        --class-subsets "$3" --class-share full --num-train-cifar10stl10 "$4" \
         --methods plain similar --pair-protocol hegc --pca-dim "${PCA_DIM:-48}" --gc-protocol "${GC_PROTOCOL:-semi-bin}" \
         --group-protocol atlas --group-version 2 --pad-max mpc --pair-workers "${PAIR_WORKERS:-8}" \
         --mpc-timeout "${MPC_TIMEOUT:-7200}" --net-mbps "${NET_MBPS:-100}" --net-rtt-ms "${NET_RTT_MS:-20}" \
-        --out "$OUT/setup" 2>&1 | tee "$OUT/setup.log"
+        --out "$OUT/$1" 2>&1 | tee "$OUT/$1.log"
     [[ ${PIPESTATUS[0]} == 0 ]] || fails=1
-fi
+}
+# setup: main split (5-6 labels per client + special clients, sizes are totals)
+has setup && setup setup "${SETUP_CLIENTS:-7 10 30 50}" "${CLASS_SUBSETS:-5,6}" "${MIXED:-2}"
+# setup_full: every client holds ALL labels of one dataset (62 = EMNIST's class count, i.e. all), no special
+# clients, the same number of clients per dataset: 5 / 10 / 30 / 50 = 1 / 2 / 6 / 10 per dataset
+has setup_full && setup setup_full "${SETUP_FULL_CLIENTS:-5 10 30 50}" 62,62 0
 
 if has train; then                                   # no MPC: ideal functionality
     echo "[$(date '+%F %T')] train: 30 clients (28 + ${MIXED:-2} special), 5 datasets (label split), plain + similar"

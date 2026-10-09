@@ -160,6 +160,11 @@ def allocate(names, normal, mixed, subsets, holders=2):
     CIFAR-10 and once for STL-10. Guaranteed when every dataset gets clients * lo >= its need (greedy
     least-covered partition, see fl_datasets.partition_class_subsets); otherwise printed as partial."""
     lo = int(subsets.split(',')[0]) if subsets and subsets != 'even' else 3
+    if all(lo >= CLASSES[d] for d in names):           # every client holds all its dataset's labels: even split
+        counts = {d: normal // len(names) + (i < normal % len(names)) for i, d in enumerate(names)}
+        print(f'clients per dataset {counts} + {mixed} special; every client holds all labels of its dataset',
+              flush=True)
+        return counts
     special = min(holders, mixed * lo // SHARED) if mixed else 0       # holders every shared name gets
     need = {d: holders * CLASSES[d] - (SHARED * special if d in ('CIFAR10', 'STL10') else 0) for d in names}
     spare, total = normal - len(names), sum(need.values())
