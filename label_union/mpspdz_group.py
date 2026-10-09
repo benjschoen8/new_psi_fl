@@ -24,7 +24,9 @@ from pathlib import Path
 
 import numpy as np
 
-SRC = Path(__file__).resolve().parent.parent / 'mpc' / 'circuit_group.mpc'
+MPC_DIR = Path(__file__).resolve().parent.parent / 'mpc'
+SRC = MPC_DIR / 'circuit_group.mpc'             # version 1; version=2: circuit_group_v2.mpc
+PROTOCOLS = ('shamir', 'atlas')                  # honest-majority field protocols: <protocol>-party.x
 HB = 54
 
 
@@ -72,11 +74,15 @@ def _row_tokens(kw, img, fuzzy, sym, d, nimg):
     return out + ([int(x) for x in img] if nimg else [])
 
 
-def mpspdz_group(rows, owners, tau=0.10, t=2, m=None, root=None, port=None, fix=7, timeout=None, edabit=True):
+def mpspdz_group(rows, owners, tau=0.10, t=2, m=None, root=None, port=None, fix=7, timeout=None, edabit=True,
+                 version=1, protocol='shamir'):
     """rows: list of (kw, img or None) as in circuit_union.group(); owners: client of each row.
     Returns (root per row, stats, K per row as int: the opened kappa of the row's root, each value
     seen only by the row's owner). Rows of a client are padded with dummies to m (default: max)."""
     home = _home(root)
+    if protocol not in PROTOCOLS:
+        raise ValueError(f'protocol must be one of {PROTOCOLS}')
+    src = SRC if version == 1 else MPC_DIR / f'circuit_group_v{version}.mpc'
     n = max(owners) + 1
     if n < 3:
         raise ValueError('honest-majority Shamir needs n >= 3 parties')
@@ -88,13 +94,14 @@ def mpspdz_group(rows, owners, tau=0.10, t=2, m=None, root=None, port=None, fix=
     embs = [kw[1] for kw, _ in rows if kw[0] == 'emb']
     d = len(embs[0]) if embs else 1
     nimg = 0 if rows[0][1] is None else len(rows[0][1])
+    kimg = int(max(int(np.sum(img)) for _, img in rows)) if nimg else 0   # ones per image indicator
     tau_i = int(round(tau * (1 << 2 * fix)))
-    args = [f'n={n}', f'm={m}', f'd={d if fuzzy else 0}', f'nimg={nimg}', f'tau={tau_i}', f't={t}',
+    args = [f'n={n}', f'm={m}', f'd={d if fuzzy else 0}', f'nimg={nimg}', f'tau={tau_i}', f't={t}', f'kimg={kimg}',
             f"mode={'fuzzy' if fuzzy else 'exact'}", f'sym={sym}']
 
-    shutil.copy(SRC, home / 'Programs' / 'Source' / SRC.name)
+    shutil.copy(src, home / 'Programs' / 'Source' / src.name)
     t0 = time.perf_counter()
-    out = subprocess.run(['python3', 'compile.py', *(['-Y'] if edabit else []), SRC.stem, *args], cwd=home, capture_output=True,
+    out = subprocess.run(['python3', 'compile.py', *(['-Y'] if edabit else []), src.stem, *args], cwd=home, capture_output=True,
                          text=True, check=True).stdout
     name = re.search(r'Writing to .*?Programs/Schedules/(\S+)\.sch', out).group(1)
     compile_s = time.perf_counter() - t0
@@ -111,7 +118,7 @@ def mpspdz_group(rows, owners, tau=0.10, t=2, m=None, root=None, port=None, fix=
         (home / 'Player-Data' / f'{tag}-Input-P{p}-0').write_text(' '.join(map(str, toks)) + '\n')
 
     t0 = time.perf_counter()
-    procs = [subprocess.Popen(['./shamir-party.x', '-N', str(n), '-p', str(p), '-pn', str(port),
+    procs = [subprocess.Popen([f'./{protocol}-party.x', '-N', str(n), '-p', str(p), '-pn', str(port),
                                '-h', 'localhost', '-IF', f'Player-Data/{tag}-Input', '-OF', tag, name], cwd=home,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
              for p in range(n)]
@@ -136,7 +143,7 @@ def mpspdz_group(rows, owners, tau=0.10, t=2, m=None, root=None, port=None, fix=
     for f in [*home.glob(f'{tag}-P*'), *(home / 'Player-Data').glob(f'{tag}-Input-*')]:
         f.unlink()
     num = lambda pat: float(re.search(pat, log0).group(1)) if re.search(pat, log0) else None
-    stats = dict(edabit=edabit, n=n, m=m, rows=n * m, d=d if fuzzy else 0, nimg=nimg, mode='fuzzy' if fuzzy else 'exact',
+    stats = dict(version=version, protocol=protocol, edabit=edabit, n=n, m=m, rows=n * m, d=d if fuzzy else 0, nimg=nimg, mode='fuzzy' if fuzzy else 'exact',
                  sym=sym, compile_seconds=round(compile_s, 2), wall_seconds=round(run_s, 2),
                  time_seconds=num(r'Time = ([\d.e+-]+) seconds'),
                  party0_MB=num(r'Data sent = ([\d.e+-]+) MB'),
@@ -179,6 +186,8 @@ def main():
     ap.add_argument('--groups', type=int, default=None, help='planted classes (default 1.5 m)')
     ap.add_argument('--out', default=None, help='append results as JSON lines')
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--version', type=int, default=1, help='circuit version (2: cheaper image test and check)')
+    ap.add_argument('--protocol', choices=PROTOCOLS, default='shamir')
     ap.add_argument('--no-edabit', dest='edabit', action='store_false',
                     help='comparisons by plain bit decomposition (default: edaBits, compile -Y; ~2.5x less traffic)')
     a = ap.parse_args()
@@ -187,7 +196,8 @@ def main():
         for m in a.m:
             rows, owners = _synthetic(n, m, a.groups or int(1.5 * m), a.fuzzy, rng)
             ideal, steps = group(rows, TAU, 2, owners)
-            got, st, _ = mpspdz_group(rows, owners, TAU, 2, m=m, edabit=a.edabit)
+            got, st, _ = mpspdz_group(rows, owners, TAU, 2, m=m, edabit=a.edabit,
+                                         version=a.version, protocol=a.protocol)
             ok = got == ideal
             st.update(groups=len(set(ideal)), equal_to_ideal=ok,
                       estimate=mpc_cost(n, m, st['d'] or 1, st['nimg'], 1, steps))

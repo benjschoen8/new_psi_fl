@@ -95,10 +95,12 @@ def _kw_match(a, b, tau):
     return 2 * int(a[1] @ b[1]) - a[2] - b[2] >= int(round(tau * (1 << 2 * FIX)))
 
 
-def group(rows, tau=TAU, t=2, owners=None):
+def group(rows, tau=TAU, t=2, owners=None, kw_match=None):
     """Ideal functionality of step C on the real rows (dummies never match). rows: list of
     (kw, img or None); owners: client of each row (rows of one client are not compared).
-    Returns (group id per row, propagation steps the components need)."""
+    Returns (group id per row, propagation steps the components need). kw_match(a, b, tau): another
+    keyword predicate (default _kw_match; e.g. label_union.simhash.kw_match)."""
+    kw_match = kw_match or _kw_match
     N = len(rows)
     parent = list(range(N))
 
@@ -113,7 +115,7 @@ def group(rows, tau=TAU, t=2, owners=None):
             if owners is not None and owners[i] == owners[j]:
                 continue
             (ki, bi), (kj, bj) = rows[i], rows[j]
-            if (bi is None or int(bi @ bj) >= t) and _kw_match(ki, kj, tau):
+            if (bi is None or int(bi @ bj) >= t) and kw_match(ki, kj, tau):
                 adj[i].append(j), adj[j].append(i)
                 ri, rj = find(i), find(j)
                 if ri != rj:

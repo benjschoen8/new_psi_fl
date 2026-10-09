@@ -1,0 +1,223 @@
+# Step C of label_union.circuit_union in MP-SPDZ, version 2 (circuit_group.mpc is version 1, unchanged).
+# Same inputs, outputs and grouping as version 1; cheaper:
+#   - image test [<s,s'> >= t] as a public polynomial in the overlap (0..k): multiplications only, no
+#     bit decomposition (arg kimg = k ones per indicator, default 6)
+#   - convergence check without comparisons: labels are final iff sum over matched pairs of
+#     (lab_a - lab_b)^2 is 0, i.e. 2 sum lab^2 deg - 2 sum lab (Mu lab): one matrix-vector product and one
+#     zero test; a secret min-propagation step (N^2 comparisons) runs only when that check fails, so the
+#     common case (every class a clique of matches) needs no secret step at all
+# Opened: one 'converged' bit per check, as in version 1 (= number of propagation steps).
+#
+# Step C of label_union.circuit_union in MP-SPDZ: match + connected components + K to owner.
+# Run by label_union/mpspdz_group.py (input files, compile, n local parties, output parsing).
+#
+#   ./compile.py circuit_group n=3 m=4 d=384 nimg=45 tau=1638 t=2 mode=fuzzy sym=0
+#   (mode=exact: d is ignored, the keyword is a hash; nimg=0: no image check)
+#
+# Input of party p (Player-Data/Input-P<p>-0), m rows, each:
+#   v                       valid bit (0 = dummy row)
+#   exact: h                keyword hash (HB bits)
+#   fuzzy: [f h] e_1..e_d r  (f, h only with sym=1: symbol flag and symbol hash); e = round(e*2^7),
+#                           r = round(r*2^14)
+#   s_1..s_nimg             0/1 image-anchor indicator
+# Output to party p only: one line 'K <row> <kappa>' per row (kappa of the row's component root).
+#
+# Rows a = p*m + i. Root = smallest row of the component (as circuit_union.group()).
+# ponytail: matching on full m x m blocks per client pair, propagation over all N x N entries;
+# O(N^2) per step, same as mpc_cost. Use for N up to a few hundred rows.
+
+import math
+
+A = dict(a.split('=', 1) for a in program.args if '=' in a)
+n, m = int(A['n']), int(A['m'])
+d, nimg = int(A.get('d', 0)), int(A.get('nimg', 0))
+tau, t = int(A.get('tau', 0)), int(A.get('t', 2))
+kimg = int(A.get('kimg', 6))
+fuzzy, sym = A.get('mode', 'exact') == 'fuzzy', int(A.get('sym', 0))
+N = n * m
+HB = 54                                   # keyword hash bits (40 + 2 log2 N for N <= 2^7)
+KB = 2 * 7 + 4                            # CSLS value: |2<e,e'> - r - r'| < 2^17 at 2^14
+IB = max(2, math.ceil(math.log2(nimg + 2)) + 1)
+LB = math.ceil(math.log2(N + 1)) + 1      # labels 0..N (N = 'no match')
+BIG = N
+CB = math.ceil(math.log2(2 * N ** 4 + 1)) + 1   # convergence sum < 2 N^4
+
+
+def at_least_t(x):
+    """[x >= t] for x in 0..kimg: public polynomial (Lagrange), k-1 multiplications, no comparison."""
+    from fractions import Fraction
+    from math import lcm
+    pts = range(kimg + 1)
+    coef = [Fraction(0)] * (kimg + 1)                 # coefficients of 1 - sum_{v<t} L_v(x)
+    coef[0] = Fraction(1)
+    for v in range(min(t, kimg + 1)):
+        poly = [Fraction(1)]
+        for j in pts:
+            if j != v:                                 # multiply poly by (x - j) / (v - j)
+                poly = [Fraction(0)] + poly
+                for i in range(len(poly) - 1):
+                    poly[i] -= j * poly[i + 1]
+                poly = [c / (v - j) for c in poly]
+        for i, c in enumerate(poly):
+            coef[i] -= c
+    D = 1
+    for c in coef:
+        D = lcm(D, c.denominator)
+    num = [int(c * D) for c in coef]
+    acc, pw = num[0] + num[1] * x, x
+    for i in range(2, kimg + 1):
+        pw = pw * x
+        if num[i]:
+            acc = acc + num[i] * pw
+    return acc * cint(1).field_div(D)
+
+# ---- inputs (step B: shares of every value) -------------------------------------------------
+V, L_, R_, I_, SF, SG, SH1, SH2 = [], [], [], [], [], [], [], []
+for p in range(n):
+    v = sint.Matrix(m, 1)
+    if fuzzy:
+        Lm, Rm = sint.Matrix(m, d + 2), sint.Matrix(m, d + 2)    # L.R^T = 2<e,e'> - r - r'
+    else:
+        Lm, Rm = sint.Matrix(m, 2), sint.Matrix(m, 2)            # L.R^T = h - h'
+    if sym:                                                      # symbol flag f, symbol hash h
+        Sf, Sg = sint.Matrix(m, 1), sint.Matrix(m, 1)            # f, 1 - f
+        Sh1, Sh2 = sint.Matrix(m, 2), sint.Matrix(m, 2)          # (h, -1).(1, h') = h - h'
+    img = sint.Matrix(m, nimg) if nimg else None
+    for i in range(m):
+        v[i][0] = sint.get_input_from(p)
+        if fuzzy:
+            if sym:
+                f, h = sint.get_input_from(p), sint.get_input_from(p)
+                Sf[i][0], Sg[i][0] = f, 1 - f
+                Sh1[i][0], Sh1[i][1] = h, sint(-1)
+                Sh2[i][0], Sh2[i][1] = sint(1), h
+            e = sint.get_input_from(p, size=d)
+            r = sint.get_input_from(p)
+            Lm[i].assign_vector(2 * e)
+            Rm[i].assign_vector(e)
+            Lm[i][d], Lm[i][d + 1] = -r, sint(-1)
+            Rm[i][d], Rm[i][d + 1] = sint(1), r
+        else:
+            h = sint.get_input_from(p)
+            Lm[i][0], Lm[i][1] = h, sint(-1)
+            Rm[i][0], Rm[i][1] = sint(1), h
+        if nimg:
+            img[i].assign_vector(sint.get_input_from(p, size=nimg))
+    V.append(v); L_.append(Lm); R_.append(Rm); I_.append(img)
+    if sym:
+        SF.append(Sf); SG.append(Sg); SH1.append(Sh1); SH2.append(Sh2)
+
+# ---- match bits mu for every pair of rows of different clients ------------------------------
+Mu = sint.Matrix(N, N)
+Mu.assign_all(0)
+for a in range(N):
+    Mu[a][a] = sint(1)                    # own row: lets the first step return the row itself
+for p in range(n):
+    for q in range(p + 1, n):
+        mu = V[p].mul_trans(V[q]).get_vector()                                   # v v'
+        kw = L_[p].mul_trans(R_[q]).get_vector()
+        if fuzzy:
+            kw = kw.greater_equal(tau, bit_length=KB)                            # CSLS
+            if sym:                                                              # symbols match
+                both_sym = SF[p].mul_trans(SF[q]).get_vector()                   # only symbols
+                both_emb = SG[p].mul_trans(SG[q]).get_vector()
+                same = SH1[p].mul_trans(SH2[q]).get_vector().equal(0, bit_length=HB)
+                kw = both_sym * same + both_emb * kw
+        else:
+            kw = kw.equal(0, bit_length=HB)
+        mu = mu * kw
+        if nimg:
+            ov = I_[p].mul_trans(I_[q]).get_vector()                             # <s, s'>
+            mu = mu * at_least_t(ov)
+        blk = sint.Matrix(m, m)
+        blk.assign_vector(mu)
+        blkT = blk.transpose()
+        for i in range(m):
+            Mu[p * m + i].assign_vector(blk[i].get_vector(), base=q * m)
+            Mu[q * m + i].assign_vector(blkT[i].get_vector(), base=p * m)
+
+# ---- connected components: min-label propagation --------------------------------------------
+# Step 1 on public row numbers: label = first j with mu[a][j] = 1 (prefix-OR; mu[a][a] = 1).
+# Mu is symmetric, so column j over all rows a is the vector Mu[j].
+kappa = sint.get_random(size=N)          # joint random secret per row
+Kap = sint.Matrix(N, 1)
+Kap.assign_vector(kappa)
+Fm = sint.Matrix(N, N)                   # Fm[a][j] = 1 iff j is the first match of row a
+Lab = sint.Array(N)
+P = Mu[0].get_vector()
+Fm.set_column(0, P)
+lab = sint(0, size=N)
+for j in range(1, N):
+    c = Mu[j].get_vector()
+    F = c * (1 - P)                       # first 1 of the row is at j
+    Fm.set_column(j, F)
+    lab = lab + j * F
+    P = P + F
+Lab.assign_vector(lab)
+Kr = sint.Array(N)                       # kappa of each row's current label
+Kr.assign_vector(Fm.dot(Kap).get_vector())
+
+# Later steps on secret labels: lab[a] = min over j with mu[a][j] = 1 of lab[j], carrying kappa
+# (rows with one label hold one kappa). Each check opens one 'converged' bit; a step runs only if not.
+X = sint.Array(N * N)                    # column-major: X[j*N + a] = mu[a][j] ? lab[j] : BIG
+Y = sint.Array(N * N)                    # Y[j*N + a] = kappa of lab[j]
+Deg = sint.Array(N)                      # matches per row (incl. itself), linear
+
+
+@for_range_opt(N)
+def _(a):
+    Deg[a] = Mu[a].get_vector().sum()
+
+
+steps = regint.Array(1)
+steps[0] = 1
+
+
+def converged():
+    lab = Lab.get_vector()
+    LabM = sint.Matrix(N, 1)
+    LabM.assign_vector(lab)
+    ml = Mu.dot(LabM).get_vector()                     # (Mu lab)_a
+    tot = (lab * lab * Deg.get_vector()).sum() - (lab * ml).sum()   # half the sum over pairs
+    return regint(tot.equal(0, bit_length=CB).reveal())
+
+
+def secret_step():
+    @for_range_opt(N)
+    def _(j):
+        X.assign_vector(Mu[j].get_vector() * (Lab[j] - BIG).expand_to_vector(N) + BIG, base=j * N)
+        Y.assign_vector(Kr[j].expand_to_vector(N), base=j * N)
+    w = N
+    cx, cy = X, Y
+    while w > 1:                          # tree min over the columns, all rows at once
+        h = w // 2
+        a, b = cx.get_vector(0, h * N), cx.get_vector(h * N, h * N)
+        ka, kb = cy.get_vector(0, h * N), cy.get_vector(h * N, h * N)
+        lt = a.less_than(b, bit_length=LB)
+        nx, ny = sint.Array(((w + 1) // 2) * N), sint.Array(((w + 1) // 2) * N)
+        nx.assign_vector(b + lt * (a - b))
+        ny.assign_vector(kb + lt * (ka - kb))
+        if w % 2:
+            nx.assign_vector(cx.get_vector((w - 1) * N, N), base=h * N)
+            ny.assign_vector(cy.get_vector((w - 1) * N, N), base=h * N)
+        cx, cy, w = nx, ny, (w + 1) // 2
+    Lab.assign_vector(cx.get_vector(0, N))
+    Kr.assign_vector(cy.get_vector(0, N))
+
+
+@do_while
+def _():
+    done = converged()
+
+    @if_(done == 0)
+    def _():
+        secret_step()
+        steps[0] += 1
+    return 1 - done
+
+print_ln('propagation steps (incl. the public first step): %s', steps[0])
+
+# ---- K = kappa of the root, opened to the owner only ----------------------------------------
+for p in range(n):
+    for i in range(m):
+        print_ln_to(p, 'K %s %s', i, Kr[p * m + i].reveal_to(p))

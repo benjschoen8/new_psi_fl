@@ -199,6 +199,100 @@ separately. Plain label transport is uninstrumented, hence its reported zero byt
 complete network cost. There is no isolated network-latency measurement. Synthetic smoke
 results check the setup pipeline, rather than replace full research benchmarks.
 
+### New independent hybrid setup benchmark
+
+`setup_smoke_hybrid.py` is a separate version. The original `setup_smoke.py`,
+`circuit_union.py`, `mpspdz_group.py`, and `mpc/circuit_group.mpc` are unchanged.
+
+```bash
+# Real MNIST / EMNIST byclass / CIFAR-10; fuzzy; 3, 5, 10, 30, 50 clients.
+python -m setup_smoke_hybrid --mpc-timeout 3600 --out setup_results_hybrid
+
+# Include exact matching and the plain reference.
+python -m setup_smoke_hybrid --methods plain exact fuzzy --mpc-timeout 3600 --out setup_results_hybrid_all
+
+# Small real-MPC smoke, using synthetic inputs and a smaller union vector.
+python -m setup_smoke_hybrid --data synthetic --clients 3 5 --labels 3 --methods exact --bucket-bits 8 --out setup_results_hybrid_smoke
+
+# Compare the untouched global protocol with the new hybrid protocol.
+python -m setup_smoke_hybrid --mpc-mode both --clients 3 5 --methods exact --out setup_results_compare
+```
+
+The hybrid executes `semi-party.x` separately for every client pair. The matching
+circuit uses the original encoded keyword coordinates/radius and image-anchor
+overlap predicate. It reveals only fresh full-field additive shares of match bits,
+one share to each endpoint. Each endpoint's share is then a private input to
+`shamir-party.x`; the match graph is added and grouped **inside MPC**, never
+reconstructed by Python. The global stage generates joint random row secrets,
+propagates each component's minimum-row secret, and reveals each key to its row
+owner. Existing bucket union and public-key SecAgg run afterwards. The exact same
+prime, `2^127 - 1`, is explicitly selected for both MPC stages.
+
+This is **two-party matching plus global private grouping**, not a completely
+pairwise protocol. Global grouping retains Shamir's honest-majority requirement
+and the original public convergence/propagation-step leakage. It does not provide
+privacy against all other clients colluding. Owners learn their final keys;
+padding size, client count, schedule and timings are public. All private files
+and processes live on one benchmark host, so the host is not an isolation boundary
+or a production aggregator. Private temporary files are permission-restricted
+and removed after success or failure. This implementation is a benchmark, not a
+formal security proof of protocol composition.
+
+Optimizations and controls:
+
+- `--pair-concurrency 2` batches round-robin pairings with at most two active
+  partners per client; `--pair-workers 4` caps simultaneous sessions on this host.
+  All `n*(n-1)/2` pairs still execute (1,225 pairs for 50 clients).
+- `--group-prefix parallel` uses a work-efficient product tree to find the first
+  matching row, with logarithmic multiplication depth. `serial` retains the
+  sequential prefix for comparison.
+- `--group-block-rows 64` bounds grouping's candidate/reduction buffers. Smaller
+  blocks reduce workspace at the cost of more sequential work. The adjacency
+  matrix remains dense: `(n * max_labels)^2` field elements **per party**. At
+  50 × 62 rows this is 9,610,000 elements per party; this change does not guarantee
+  that a full run fits a particular machine or container memory limit.
+- Grouping defaults to arithmetic-only comparisons; `--group-edabit` enables the
+  mixed Shamir/CCD path for comparison. Two-party matching still uses edaBits.
+  In one local MP-SPDZ 0.4.2/macOS ARM64 grouping-only check (10 parties, one row
+  each, isolated vertices), arithmetic-only took 0.40 s / 12.8 MB versus
+  7.60 s / 1,050.8 MB with edaBits. These are single synthetic smoke measurements,
+  not a 50-client real-data speedup claim.
+- Compiled circuits are cached by source, compiler, flags and public parameters.
+  `compile_cache_hits` distinguishes cache reuse. Each execution still performs
+  real cryptographic preprocessing; preprocessing correlations are not reused.
+
+The same original data loader, partitions, label metadata, image sampler and
+fuzzy keyword encoder are reused. No training runs. MP-SPDZ is checked/downloaded
+with the existing installer, and `semi-party.x` is built if missing. ARM64/GX10
+uses native source compilation. `--simulate` is rejected in pairwise mode;
+`--mpc-timeout` applies to each hybrid session and compilation, not the original
+global backend or the entire experiment.
+
+Reports separate image setup, compilation, matching, share-file transfer and
+global grouping wall times. `mpc_global_MB` sums MP-SPDZ's reported **Global data
+sent** over every pair and the global stage (decimal MB, not packet capture or
+total NIC bytes). Existing union/key SecAgg accounting is stored separately.
+Hybrid per-client upload/download totals remain `null`/blank because that full
+breakdown is not instrumented; they are not zero. Plain transport remains
+uninstrumented. Local wall time includes process startup and cryptographic
+preprocessing but excludes installation, data loading and sampling. Compilation
+and encoder caches must be controlled when making research comparisons.
+
+Each completed trial is written immediately. A failed hybrid MPC session records
+its public stage, party exit code/signal and recognized system diagnostic in
+`setup.json`, and stops/reaps the other active sessions. Earlier completed rows
+remain saved. Raw private logs and share values are not included in reports.
+Use a new output directory for each experiment; restarting with the same directory
+overwrites reports and does **not** resume the interrupted MPC job.
+
+For the old error `RuntimeError: party 0 failed:` with no text, the old runner
+omits the return code and prints only captured stdout/stderr. The traceback alone
+cannot establish OOM. On the Linux/GX10 host, inspect the kernel/container evidence
+around the failure, for example `dmesg -T | grep -Ei 'oom|out of memory|killed process'`
+or `journalctl -k`; access may require host privileges. A new `SIGKILL` diagnostic
+also needs that evidence before calling it OOM. Increasing the timeout does not
+solve a memory-limit kill.
+
 測試包含：CPU 真實梯度更新、原版 DCGAN 本地訓練權重對照、PACFL、雙向 mapping 的成功與失敗 cycle、oracle permutation、錯誤合併評測、未抽樣群保留、tensor snapshot 不共用儲存、mapping 隨機性隔離與 server 職責檢查。
 
 合成 smoke 僅驗證管線與輸出；不代表研究精準度。尚未執行完整真實資料集 / GPU 實驗。

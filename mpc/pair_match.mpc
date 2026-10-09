@@ -1,0 +1,82 @@
+# Two-party matching stage for the setup-only hybrid benchmark.
+# Input: the same padded rows and fixed-point encoding as circuit_group.mpc,
+# with local parties 0 and 1 standing for one public client pair (p, q), p < q.
+#
+# ./compile.py -F 64 -Y pair_match m=4 d=384 nimg=45 tau=1638 t=2 mode=fuzzy sym=0
+# Both this program and shared_graph_group MUST execute in the identical prime
+# field. Selecting only the same bit length is not a substitute for fixing p.
+# Output to party 0 only: S <i*m+j> <u_ij>
+# Output to party 1 only: S <i*m+j> <mu_ij-u_ij mod p>
+# Neither match bits nor the other endpoint's shares are opened to a party.
+
+import math
+
+A = dict(a.split('=', 1) for a in program.args if '=' in a)
+m = int(A['m'])
+d, nimg = int(A.get('d', 0)), int(A.get('nimg', 0))
+tau, t = int(A.get('tau', 0)), int(A.get('t', 2))
+fuzzy, sym = A.get('mode', 'exact') == 'fuzzy', int(A.get('sym', 0))
+HB = 54
+KB = 2 * 7 + 4
+IB = max(2, math.ceil(math.log2(nimg + 2)) + 1)
+
+V, L_, R_, I_, SF, SG, SH1, SH2 = [], [], [], [], [], [], [], []
+for p in range(2):
+    v = sint.Matrix(m, 1)
+    if fuzzy:
+        Lm, Rm = sint.Matrix(m, d + 2), sint.Matrix(m, d + 2)
+    else:
+        Lm, Rm = sint.Matrix(m, 2), sint.Matrix(m, 2)
+    if fuzzy and sym:
+        Sf, Sg = sint.Matrix(m, 1), sint.Matrix(m, 1)
+        Sh1, Sh2 = sint.Matrix(m, 2), sint.Matrix(m, 2)
+    img = sint.Matrix(m, nimg) if nimg else None
+    for i in range(m):
+        v[i][0] = sint.get_input_from(p)
+        if fuzzy:
+            if sym:
+                f, h = sint.get_input_from(p), sint.get_input_from(p)
+                Sf[i][0], Sg[i][0] = f, 1 - f
+                Sh1[i][0], Sh1[i][1] = h, sint(-1)
+                Sh2[i][0], Sh2[i][1] = sint(1), h
+            e = sint.get_input_from(p, size=d)
+            r = sint.get_input_from(p)
+            Lm[i].assign_vector(2 * e)
+            Rm[i].assign_vector(e)
+            Lm[i][d], Lm[i][d + 1] = -r, sint(-1)
+            Rm[i][d], Rm[i][d + 1] = sint(1), r
+        else:
+            h = sint.get_input_from(p)
+            Lm[i][0], Lm[i][1] = h, sint(-1)
+            Rm[i][0], Rm[i][1] = sint(1), h
+        if nimg:
+            img[i].assign_vector(sint.get_input_from(p, size=nimg))
+    V.append(v); L_.append(Lm); R_.append(Rm); I_.append(img)
+    if fuzzy and sym:
+        SF.append(Sf); SG.append(Sg); SH1.append(Sh1); SH2.append(Sh2)
+
+mu = V[0].mul_trans(V[1]).get_vector()
+kw = L_[0].mul_trans(R_[1]).get_vector()
+if fuzzy:
+    kw = kw.greater_equal(tau, bit_length=KB)
+    if sym:
+        both_sym = SF[0].mul_trans(SF[1]).get_vector()
+        both_emb = SG[0].mul_trans(SG[1]).get_vector()
+        same = SH1[0].mul_trans(SH2[1]).get_vector().equal(0, bit_length=HB)
+        kw = both_sym * same + both_emb * kw
+else:
+    kw = kw.equal(0, bit_length=HB)
+mu = mu * kw
+if nimg:
+    ov = I_[0].mul_trans(I_[1]).get_vector()
+    mu = mu * ov.greater_equal(t, bit_length=IB)
+
+# Fresh full-field masks are necessary: a bit mask or a short integer mask
+# would leak information through the distribution of the other share.
+u = sint.get_random(size=m * m)
+left, right = sint.Array(m * m), sint.Array(m * m)
+left.assign_vector(u)
+right.assign_vector(mu - u)
+for i in range(m * m):
+    print_ln_to(0, 'S %s %s', i, left[i].reveal_to(0))
+    print_ln_to(1, 'S %s %s', i, right[i].reveal_to(1))

@@ -1,0 +1,189 @@
+# Group secret-shared pairwise matches without reconstructing the graph. Version 2
+# (shared_graph_group.mpc is version 1, unchanged): same inputs, outputs and grouping, but the
+# convergence check needs no comparison: labels are final iff the sum over matched pairs of
+# (lab_a - lab_b)^2 is 0, i.e. sum lab^2 deg - sum lab (Mu lab) = 0 (one matrix-vector product and
+# one zero test). A secret min-propagation step (N^2 comparisons) runs only when that check fails,
+# so when every class is a clique of matches the grouping uses no comparison at all. Opened: one
+# 'converged' bit per check, as in version 1 (= number of propagation steps).
+#
+# ./compile.py -F 64 -Y shared_graph_group n=3 m=4
+# MUST use the identical prime field as pair_match, including the exact prime.
+# Input order: visit client pairs (p, q) lexicographically, p < q. For each
+# pair, read m*m row-major additive shares from p, then m*m from q (share=xor: XOR bits). A party's
+# input file concatenates only its own portions in this global pair order.
+# Each input is privately Shamir-shared; only their secret sum is used below.
+# Output and component computation match circuit_group.mpc: per-owner K lines
+# and a public propagation-step count (the existing convergence leakage).
+
+import math
+
+A = dict(a.split('=', 1) for a in program.args if '=' in a)
+n, m = int(A['n']), int(A['m'])
+N = n * m
+LB = math.ceil(math.log2(N + 1)) + 1
+BIG = N
+CB = math.ceil(math.log2(N ** 4 + 1)) + 1     # check sum < N^4
+prefix = A.get('prefix', 'parallel')
+block_rows = min(N, int(A.get('block', 64)))
+xor = A.get('share', 'add') == 'xor'          # share=xor: 0/1 XOR shares (garbled pair versions)
+if block_rows < 1:
+    raise ValueError('block must be positive')
+
+
+def first_match_columns(columns, width, mode):
+    """Select the first 1 using exclusive products of (1 - match).
+
+    The parallel up/down tree uses O(len(columns) * width) secret products
+    and O(log len(columns)) dependent multiplication layers.
+    """
+    if mode == 'serial':
+        remaining = 1 - columns[0]
+        result = [columns[0]]
+        for column in columns[1:]:
+            first = column * remaining
+            result.append(first)
+            remaining = remaining - first
+        return result
+    if mode != 'parallel':
+        raise ValueError('unknown prefix mode')
+    levels = [[1 - column for column in columns]]
+    while len(levels[-1]) > 1:
+        current = levels[-1]
+        pairs = len(current) // 2
+        products = sint.concat(current[0:2*pairs:2]) * sint.concat(current[1:2*pairs:2])
+        parent = [products.get_vector(i * width, width) for i in range(pairs)]
+        if len(current) % 2:
+            parent.append(current[-1])
+        levels.append(parent)
+    exclusive = [sint(1, size=width)]
+    for children in reversed(levels[:-1]):
+        pairs = len(children) // 2
+        right = sint.concat(exclusive[:pairs]) * sint.concat(children[0:2*pairs:2])
+        expanded = []
+        for i in range(pairs):
+            expanded.extend([exclusive[i], right.get_vector(i * width, width)])
+        if len(children) % 2:
+            expanded.append(exclusive[-1])
+        exclusive = expanded
+    first = sint.concat(columns) * sint.concat(exclusive)
+    return [first.get_vector(i * width, width) for i in range(len(columns))]
+
+Mu = sint.Matrix(N, N)
+Mu.assign_all(0)
+for a in range(N):
+    Mu[a][a] = sint(1)
+for p in range(n):
+    for q in range(p + 1, n):
+        left = sint.get_input_from(p, size=m * m)
+        right = sint.get_input_from(q, size=m * m)
+        blk = sint.Matrix(m, m)
+        blk.assign_vector(left + right - 2 * left * right if xor else left + right)
+        blkT = blk.transpose()
+        for i in range(m):
+            Mu[p * m + i].assign_vector(blk[i].get_vector(), base=q * m)
+            Mu[q * m + i].assign_vector(blkT[i].get_vector(), base=p * m)
+        blk.delete()
+        blkT.delete()
+
+# Min-label propagation, as in circuit_group.mpc. Joint random row secrets
+# are generated here, rather than adopted independently from pair sessions.
+kappa = sint.get_random(size=N)
+Kap = sint.Matrix(N, 1)
+Kap.assign_vector(kappa)
+Lab = sint.Array(N)
+Kr = sint.Array(N)
+
+
+def each_block(operation):
+    # Public row blocks bound working space without exposing graph structure.
+    @for_range(N // block_rows)
+    def _(b):
+        operation(b * block_rows, block_rows)
+    if N % block_rows:
+        operation(N - N % block_rows, N % block_rows)
+
+
+def initialize_block(base, width):
+    Fm = sint.Matrix(width, N)
+    columns = [Mu[j].get_vector(base, width) for j in range(N)]
+    lab = sint(0, size=width)
+    for j, F in enumerate(first_match_columns(columns, width, prefix)):
+        Fm.set_column(j, F)
+        lab = lab + j * F
+    Lab.assign_vector(lab, base=base)
+    Kr.assign_vector(Fm.dot(Kap).get_vector(), base=base)
+    Fm.delete()
+
+
+each_block(initialize_block)
+Kap.delete()
+next_lab, next_key = sint.Array(N), sint.Array(N)
+steps = regint.Array(1)
+steps[0] = 1
+
+
+def propagate_block(base, width):
+    # The adjacency matrix remains dense. Only candidate/reduction buffers are
+    # blocked: O(N * block_rows), instead of separate N*N X and Y matrices.
+    X, Y = sint.Array(N * width), sint.Array(N * width)
+    @for_range_opt(N)
+    def _(j):
+        X.assign_vector(Mu[j].get_vector(base, width) * (Lab[j] - BIG).expand_to_vector(width) + BIG, base=j * width)
+        Y.assign_vector(Kr[j].expand_to_vector(width), base=j * width)
+    w = N
+    cx, cy = X, Y
+    while w > 1:
+        h = w // 2
+        a, b = cx.get_vector(0, h * width), cx.get_vector(h * width, h * width)
+        ka, kb = cy.get_vector(0, h * width), cy.get_vector(h * width, h * width)
+        lt = a.less_than(b, bit_length=LB)
+        nx, ny = sint.Array(((w + 1) // 2) * width), sint.Array(((w + 1) // 2) * width)
+        nx.assign_vector(b + lt * (a - b))
+        ny.assign_vector(kb + lt * (ka - kb))
+        if w % 2:
+            nx.assign_vector(cx.get_vector((w - 1) * width, width), base=h * width)
+            ny.assign_vector(cy.get_vector((w - 1) * width, width), base=h * width)
+        cx.delete()
+        cy.delete()
+        cx, cy, w = nx, ny, (w + 1) // 2
+    next_lab.assign_vector(cx.get_vector(0, width), base=base)
+    next_key.assign_vector(cy.get_vector(0, width), base=base)
+    cx.delete()
+    cy.delete()
+
+
+Deg = sint.Array(N)                      # matches per row (incl. itself)
+
+
+@for_range_opt(N)
+def _(a):
+    Deg[a] = Mu[a].get_vector().sum()
+
+
+def converged():
+    lab = Lab.get_vector()
+    LabM = sint.Matrix(N, 1)
+    LabM.assign_vector(lab)
+    ml = Mu.dot(LabM).get_vector()                     # (Mu lab)_a
+    LabM.delete()
+    tot = (lab * lab * Deg.get_vector()).sum() - (lab * ml).sum()   # half the sum over pairs
+    return regint(tot.equal(0, bit_length=CB).reveal())
+
+
+@do_while
+def _():
+    done = converged()
+
+    @if_(done == 0)
+    def _():
+        each_block(propagate_block)
+        Lab.assign_vector(next_lab.get_vector())
+        Kr.assign_vector(next_key.get_vector())
+        steps[0] += 1
+    return 1 - done
+
+print_ln('propagation steps (incl. the public first step): %s', steps[0])
+
+for p in range(n):
+    for i in range(m):
+        print_ln_to(p, 'K %s %s', i, Kr[p * m + i].reveal_to(p))

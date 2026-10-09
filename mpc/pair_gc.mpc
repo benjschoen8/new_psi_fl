@@ -1,0 +1,86 @@
+# Two-party garbled-circuit matching (yao-party.x) for the hybrid setup; new pair versions
+# 'hegc' and 'simhash' of label_union.mpspdz_pairwise (pair_match.mpc is unchanged).
+# Party 0 = client p, party 1 = client q (p < q), m padded rows each, all m*m entries in
+# parallel (SIMD over entries e = i*m + j, row i of p, row j of q).
+#
+#   ./compile.py -G pair_gc m=4 kw=masked nimg=45 t=2 tau=1638        (kw: masked | eq | simhash)
+#
+# Inputs of each party, in this order:
+#   v_i                 per row, 1 bit: valid
+#   kw=masked: party 0: x_e, party 1: y_e (L bits each), from the HE inner-product session
+#              (pair_inner.mpc): party 0 got s_e + rho_e with rho_e < 2^58 (statistical mask),
+#              both reduce mod 2^L, party 1 adds tau: s_e - tau = x_e - y_e mod 2^L (|.| < 2^(L-1)),
+#              s_e = 2<e,e'> - r - r' at 2^14; keyword match iff s_e >= tau
+#   kw=eq:     h_i      per row, HB-bit keyword hash; match iff equal
+#   kw=simhash: c_i     per row, k bits as k/64 words (sign of k public hyperplanes),
+#              g_i      per row, G-bit integer threshold share; match iff S*Ham(c, c') + g + g' <= C
+#   s_i                 per row, nimg bits as one word (nimg <= 64); match iff |s & s'| >= t
+#   z_e                 per entry, 1 bit: own fresh random mask
+# Output (public): w_e = mu_e ^ z_e(party 0) ^ z_e(party 1). Party 0's share of mu_e is w_e ^ z_e,
+# party 1's share is z_e: each sees w_e, uniform given its view; mu_e is never opened.
+
+import math
+
+A = dict(a.split('=', 1) for a in program.args if '=' in a)
+m = int(A['m'])
+kw = A.get('kw', 'masked')
+nimg, t = int(A.get('nimg', 0)), int(A.get('t', 2))
+n = m * m
+L = int(A.get('L', 20))            # masked CSLS width: |s - tau| < 2^18
+HB = 54
+k, G, S, C = int(A.get('k', 256)), int(A.get('G', 16)), int(A.get('S', 16)), int(A.get('C', 0))
+tau = int(A.get('tau', 0))
+assert nimg <= 64 and k % 64 == 0 and S & (S - 1) == 0
+
+
+def rows(p, width):
+    return [sbits.get_type(width).get_input_from(p) for _ in range(m)]
+
+
+def tile(vals, side):              # one value per entry: row i (side 0) or row j (side 1)
+    return sbitvec([vals[e // m] if side == 0 else vals[e % m] for e in range(n)]).v
+
+
+def entries(p, width):
+    return sbitvec([sbits.get_type(width).get_input_from(p) for _ in range(n)]).v
+
+
+def uint(bits, width):             # unsigned bit slices -> signed sbitintvec of 'width' bits
+    return sbitintvec.get_type(width).from_vec(list(bits) + [sbits.get_type(n)(0)] * (width - len(bits)))
+
+
+valid = [rows(p, 1) for p in range(2)]
+if kw == 'masked':
+    X, Y = (sbitintvec.get_type(L).from_vec(entries(p, L)) for p in range(2))
+    match = ~(X - Y).v[-1]                             # sign of s - tau = x - y mod 2^L
+elif kw == 'eq':
+    H = [tile(rows(p, HB), p) for p in range(2)]
+    diff = [a ^ b for a, b in zip(*H)]
+    any1 = diff[0]
+    for b in diff[1:]:
+        any1 = any1 | b
+    match = ~any1
+elif kw == 'simhash':
+    words = k // 64
+    code = []
+    for p in range(2):
+        per = [[sbits.get_type(64).get_input_from(p) for _ in range(words)] for _ in range(m)]
+        code.append(sum((tile([per[i][w] for i in range(m)], p) for w in range(words)), []))
+    g = [tile(rows(p, G), p) for p in range(2)]
+    ham = sbitvec.from_vec([a ^ b for a, b in zip(*code)]).popcnt()
+    WG = max(G, math.ceil(math.log2(k + 1)) + int(math.log2(S))) + 3
+    zero = sbits.get_type(n)(0)
+    tot = uint([zero] * int(math.log2(S)) + ham.v, WG) + uint(g[0], WG) + uint(g[1], WG)     # g < 2^G, non-negative
+    match = ~(sbitintvec.get_type(WG)(C) - tot).v[-1]               # C - tot >= 0
+else:
+    raise CompilerError('kw must be masked, eq or simhash')
+
+mu = match & tile(valid[0], 0)[0] & tile(valid[1], 1)[0]
+if nimg:
+    img = [tile(rows(p, nimg), p) for p in range(2)]
+    cnt = sbitvec.from_vec([a & b for a, b in zip(*img)]).popcnt()
+    WC = len(cnt.v) + 2
+    mu = mu & ~(uint(cnt.v, WC) - t).v[-1]                          # |s & s'| - t >= 0
+z = [entries(p, 1)[0] for p in range(2)]
+w = (mu ^ z[0] ^ z[1]).reveal()
+print_ln('W %s', w)
