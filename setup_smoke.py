@@ -150,7 +150,7 @@ def fixture(n, m, seed):
     return labels, samples
 
 
-CLASSES = dict(MNIST=10, EMNIST=62, FashionMNIST=10, CIFAR10=10, STL10=10, SVHN=10, USPS=10)
+CLASSES = dict(MNIST=10, EMNIST=62, FashionMNIST=10, CIFAR10=10, STL10=10, SVHN=10, USPS=10, CIFAR100=100)
 SHARED = 9                                     # class names CIFAR-10 and STL-10 share (the special clients' pool)
 
 

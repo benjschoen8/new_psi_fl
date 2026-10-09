@@ -34,7 +34,8 @@ def load(spec):
     if not secure:
         raise SystemExit(f'{path}: no secure rows with timings (re-run the setup with this version)')
     first = next(iter(secure.values()))
-    label = label or f"{first['pair_workers']} pair worker{'s' * (first['pair_workers'] > 1)}"
+    label = label or ('one thread per client' if first.get('per_client_threads') else
+                      f"{first['pair_workers']} pair worker{'s' * (first['pair_workers'] > 1)}")
     return label, secure, plain, plain_net
 
 
@@ -47,7 +48,8 @@ def main(argv=None):
     out = a.out or Path(a.runs[0].partition(':')[0]).parent
     out.mkdir(parents=True, exist_ok=True)
     n = sorted(set.intersection(*(set(s) for _, s, _, _ in runs)))
-    base = min(runs, key=lambda r: next(iter(r[1].values()))['pair_workers'])   # least contended run
+    base = min(runs, key=lambda r: (bool(next(iter(r[1].values())).get('per_client_threads')),
+                                    next(iter(r[1].values()))['pair_workers']))   # least contended run
     measured = next(iter(base[1].values()))['backend'] != 'mpc-model'
     ref = base[1]
     minutes = lambda v: v / 60

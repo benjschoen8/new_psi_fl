@@ -68,7 +68,8 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None,
               mpc_mode='pairwise', pair_concurrency=2, pair_workers=4, mpc_timeout=600,
               group_prefix='parallel', group_block_rows=64, group_edabit=False,
               group_version=1, group_protocol='shamir', pair_protocol='semi',
-              pca_dim=None, simhash_bits=256, simhash_u0=1.0, gc_protocol='yao', pad_max='plain', mpc_model=False):
+              pca_dim=None, simhash_bits=256, simhash_u0=1.0, gc_protocol='yao', pad_max='plain', mpc_model=False,
+              pad_to=None):
     # Make every trial include cold public image-anchor construction. The single
     # process then shares that cache, as in the current simulation, not n hosts.
     anchor_matrix.cache_clear()
@@ -85,7 +86,7 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None,
                                pair_concurrency=pair_concurrency, pair_workers=pair_workers,
                                group_edabit=group_edabit, group_version=group_version,
                                group_protocol=group_protocol, pair_protocol=pair_protocol)
-            mpc_options.update(pad_max=pad_max)
+            mpc_options.update(pad_max='plain' if pad_to else pad_max)   # public padding policy: no padding MPC
             if mpc_model:
                 mpc_options.update(model=True)
             if pair_protocol in ('hegc', 'simhash'):
@@ -98,7 +99,7 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None,
     index, _, _, U, stats = circuit_union_with_keys(
         labels, keywords if method == 'fuzzy' and keywords is not None else [{x: x for x in own} for own in labels], sets,
         fuzzy=method == 'fuzzy', secure=method != 'plain',
-        bucket_bits=bucket_bits, workers=workers, **options)
+        bucket_bits=bucket_bits, workers=workers, m=pad_to if pairwise else None, **options)
     elapsed = time.perf_counter() - start
     quality = union_quality(labels, index, U) if index else {}
     union_seconds = time.perf_counter() - union_start
@@ -110,7 +111,7 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None,
     download = stats['setup_download_bytes_per_client']
     return dict(
         method=method, mpc_mode=mpc_mode, group_prefix=group_prefix if pairwise else 'serial',
-        clients=len(labels), labels_per_client=max(map(len, labels)),
+        clients=len(labels), labels_per_client=max(map(len, labels)), padded_to=pad_to,
         labels_per_client_min=min(map(len, labels)), labels_per_client_mean=float(np.mean(list(map(len, labels)))),
         bucket_bits=bucket_bits, union_size=U,
         backend=('plain' if method == 'plain' else
@@ -173,7 +174,7 @@ def union_quality(labels, index, U):
 UNION_ROUNDS = 3        # union/key SecAgg after the MPC: upload tags, masked keys, download result
 
 
-def setup_comm(row, mbps, rtt_ms, pair_workers=1):
+def setup_comm(row, mbps, rtt_ms, pair_workers=1, per_client=False):
     """Per-client setup communication: measured MP-SPDZ traffic (each party's own 'Data sent', plus what
     it receives) and rounds, plus the union/key SecAgg bytes; modelled time = bytes * 8 / bandwidth +
     rounds * RTT on the slowest client (MPC rounds summed over its sessions: an upper bound)."""
@@ -192,7 +193,7 @@ def setup_comm(row, mbps, rtt_ms, pair_workers=1):
     sessions = mpc.get('pair_sessions') or 0
     pair_s = mpc.get('matching_seconds', 0) * min(pair_workers, sessions) / sessions if sessions else 0.
     sched = (n - 1 + n % 2) if sessions else 0
-    deploy = dict(pair_workers=pair_workers, host_compute_seconds=(mpc.get('matching_seconds') or 0.)
+    deploy = dict(pair_workers=pair_workers, per_client_threads=per_client, host_compute_seconds=(mpc.get('matching_seconds') or 0.)
                   + (mpc.get('group_seconds') or 0.) + (mpc.get('pad_max_seconds') or 0.), pair_session_seconds=pair_s, deploy_pair_rounds=sched,
                   deploy_matching_seconds=sched * pair_s, deploy_group_seconds=mpc.get('group_seconds') or 0.,
                   deploy_pad_seconds=mpc.get('pad_max_seconds') or 0.)
@@ -205,7 +206,8 @@ def setup_comm(row, mbps, rtt_ms, pair_workers=1):
     other = [k - r / max(1, mpc.get('pair_concurrency') or 2) for k, r in zip(rounds, raw)]   # grouping + padding
     net = lambda c: max(b * 8 / (mbps * 1e6) + (r / c + o + UNION_ROUNDS) * rtt_ms / 1e3
                         for b, r, o in zip(total, raw, other))
-    deploy.update(comm_seconds_sequential=net(1), comm_seconds_workers=net(max(1, min(pair_workers, n - 1))))
+    deploy.update(comm_seconds_sequential=net(1),          # per client: each client in one session at a time
+                  comm_seconds_workers=net(1 if per_client else max(1, min(pair_workers, n - 1))))
     return dict(**deploy, comm_MB_per_client_mean=sum(total) / n / 1e6, comm_MB_per_client_max=max(total) / 1e6,
                 mpc_MB_per_client_mean=sum(s + r for s, r in zip(sent, recv)) / n,
                 union_MB_per_client=(union_up + union_down) / 1e6,
@@ -276,7 +278,12 @@ def main(argv=None):
     parser.add_argument('--pair-concurrency', type=int, default=2,
                         help='maximum active matching sessions per client (default 2)')
     parser.add_argument('--pair-workers', type=int, default=4,
-                        help='maximum simultaneous matching sessions on this host (default 4)')
+                        help='maximum simultaneous matching sessions on this host (default 4); 0 = one per client: '
+                             'every client runs its sessions one at a time, all clients at once (round-robin rounds '
+                             'of n/2 disjoint pairs, n MPC processes), i.e. a per-client deployment on this host')
+    parser.add_argument('--pad-to', type=int, default=None,
+                        help='public padding policy: every client pads to this many labels (no padding MPC); '
+                             'must be >= every client\'s label count')
     parser.add_argument('--mpc-timeout', type=float, default=600,
                         help='timeout per hybrid MPC session/compilation in seconds; original global backend unchanged (default 600)')
     parser.add_argument('--group-prefix', choices=['serial', 'parallel'], default='parallel',
@@ -335,9 +342,9 @@ def main(argv=None):
         parser.error('--simhash-bits must be a positive multiple of 64 and --pca-dim positive')
     if args.simulate and args.mpc_mode != 'global':
         parser.error('--simulate supports only --mpc-mode global; pairwise requires real MPC')
-    if (args.pair_concurrency < 1 or args.pair_workers < 1 or args.group_block_rows < 1
+    if (args.pair_concurrency < 1 or args.pair_workers < 0 or args.group_block_rows < 1
             or not math.isfinite(args.mpc_timeout) or args.mpc_timeout <= 0):
-        parser.error('--pair-concurrency, --pair-workers, --group-block-rows, and --mpc-timeout must be positive')
+        parser.error('--pair-concurrency, --group-block-rows and --mpc-timeout must be positive, --pair-workers >= 0')
     if args.data == 'real' and args.labels is not None:
         parser.error('--labels is synthetic only; real label spaces come from the original data partitions')
     if args.data == 'real' and min(args.clients) < len(args.datasets.split(',')) + args.num_train_cifar10stl10:
@@ -401,6 +408,8 @@ def main(argv=None):
                 keywords, data_info = None, dict(source='synthetic', clients=n)
             report['inputs'].append(data_info)
             m = max(map(len, labels))
+            if args.pad_to and args.pad_to < m:
+                raise SystemExit(f'--pad-to {args.pad_to} < {m} labels of the largest client')
             if args.approx_check:
                 for line in approx_check(labels, samples, keywords, args.approx_bits, args.approx_dims):
                     line.update(clients=n)
@@ -414,18 +423,21 @@ def main(argv=None):
                 for method in args.methods:
                     modes = (['global'] if method == 'plain' else
                              ['global', 'pairwise'] if args.mpc_mode == 'both' else [args.mpc_mode])
+                    per_client = args.pair_workers == 0                 # one session per client at a time
+                    workers = max(1, n // 2) if per_client else args.pair_workers
+                    concurrency = 1 if per_client else args.pair_concurrency
                     for mode in modes:
                         print(f'Starting {method}/{mode}: {n} clients, max {m} labels/client, trial {repeat + 1}/{args.repeats}', flush=True)
                         try:
                             row = benchmark(method, labels, samples, args.bucket_bits, args.workers, keywords=keywords,
-                                            mpc_mode=mode, pair_concurrency=args.pair_concurrency,
-                                            pair_workers=args.pair_workers, mpc_timeout=args.mpc_timeout,
+                                            mpc_mode=mode, pair_concurrency=concurrency,
+                                            pair_workers=workers, mpc_timeout=args.mpc_timeout,
                                             group_prefix=args.group_prefix, group_block_rows=args.group_block_rows,
                                             group_edabit=args.group_edabit, group_version=args.group_version,
                                             group_protocol=args.group_protocol, pair_protocol=args.pair_protocol,
                                             pca_dim=args.pca_dim, simhash_bits=args.simhash_bits,
                                             simhash_u0=args.simhash_u0, gc_protocol=args.gc_protocol,
-                                            pad_max=args.pad_max, mpc_model=args.mpc_model)
+                                            pad_max=args.pad_max, mpc_model=args.mpc_model, pad_to=args.pad_to)
                         except (RuntimeError, subprocess.SubprocessError, KeyboardInterrupt) as error:
                             # Keep completed trials and public diagnostics even on the first failure.
                             # Never serialize input rows, private outputs, or raw process logs.
@@ -441,7 +453,7 @@ def main(argv=None):
                         row.update(data_source=args.data, data_load_partition_seconds=data_info.get('data_load_partition_seconds'),
                                    sampling_seconds=data_info.get('sampling_seconds'))
                         row['repeat'] = repeat + 1
-                        row.update(setup_comm(row, args.net_mbps, args.net_rtt_ms, args.pair_workers))
+                        row.update(setup_comm(row, args.net_mbps, args.net_rtt_ms, workers, per_client))
                         if row['backend'] == 'mpc-model':             # plaintext part measured + modelled MPC
                             row['setup_compute_seconds_model'] = row['setup_wall_seconds'] + row['mpc_wall_seconds']
                             row['setup_total_seconds_model'] = (row['setup_compute_seconds_model']

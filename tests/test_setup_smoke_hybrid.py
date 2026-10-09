@@ -86,7 +86,7 @@ class SetupSmokeTests(unittest.TestCase):
 
     def test_pairwise_rejects_simulation_and_invalid_limits_before_installation(self):
         for flags in (['--mpc-mode', 'pairwise', '--simulate'], ['--mpc-mode', 'both', '--methods', 'plain', 'exact', '--simulate'],
-                      ['--pair-concurrency', '0'], ['--pair-workers', '0'], ['--mpc-timeout', '0'],
+                      ['--pair-concurrency', '0'], ['--pair-workers', '-1'], ['--mpc-timeout', '0'],
                       ['--mpc-timeout', 'nan'], ['--group-prefix', 'invalid'], ['--group-block-rows', '0']):
             with self.subTest(flags=flags), contextlib.redirect_stderr(io.StringIO()), patch(
                     'setup_smoke_hybrid.ensure_mpspdz') as install:
