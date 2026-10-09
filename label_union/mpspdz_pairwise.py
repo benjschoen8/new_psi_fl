@@ -34,6 +34,14 @@ SOURCES = Path(__file__).resolve().parent.parent / 'mpc'
 # hegc: HE inner products (pair_inner.mpc on hemi) + garbled comparisons (pair_gc.mpc on yao);
 # simhash: garbled SimHash test (pair_gc.mpc only). Both give XOR shares (grouping version 2).
 PAIR_PROTOCOLS = ('semi', 'hemi', 'hegc', 'simhash')
+SYM_BITS = 8                        # garbled symbol test: character code of a one-letter keyword
+
+
+def _sym_code(symbol):
+    code = ord(symbol) if len(symbol) == 1 else -1
+    if not 0 < code < 1 << SYM_BITS:
+        raise ValueError('symbol keywords must be single 8-bit characters')
+    return code
 GC_L = 20                           # masked CSLS width in the garbled comparison
 RHO = (1 << 18, 1 << 58)            # statistical masks of the HE outputs (|s| < 2^17)
 _port_lock = threading.Lock()
@@ -289,7 +297,7 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
         C = sh.threshold(tau, simhash_bits, sh.SCALE, simhash_u0)[1]
         pair_program, pair_compile, pair_cached = _compile(home, SOURCES / 'pair_gc.mpc',
             [f'm={m}', f'kw={kw_mode}', f'nimg={nimg}', f't={t}', f'L={GC_L}', f'k={simhash_bits}',
-             f'S={sh.SCALE}', f'C={C}', f'G={sh.G_BITS}', f'sym={sym}'], False, timeout, flags=['-G', '-B', '64'])
+             f'S={sh.SCALE}', f'C={C}', f'G={sh.G_BITS}', f'sym={sym}', f'sb={SYM_BITS}'], False, timeout, flags=['-G', '-B', '64'])
         if kw_mode == 'masked':
             inner_program, inner_compile, inner_cached = _compile(home, SOURCES / 'pair_inner.mpc',
                 [f'm={m}', f'd={d}'], False, timeout, flags=['-F', '40'])
@@ -311,7 +319,7 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
         emb = lambda kw: kw is not None and kw[0] == 'emb'
         if sym:
             gc += [int(kw is not None and kw[0] == 'sym') for kw, _ in padded]
-            gc += [_h(kw[1]) if kw is not None and kw[0] == 'sym' else 0 for kw, _ in padded]
+            gc += [_sym_code(kw[1]) if kw is not None and kw[0] == 'sym' else 0 for kw, _ in padded]
         if kw_mode == 'eq':
             gc += [_h(kw[1]) if kw is not None else 0 for kw, _ in padded]
         elif kw_mode == 'simhash':

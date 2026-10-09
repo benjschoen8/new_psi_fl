@@ -141,7 +141,7 @@ def benchmark(method, labels, samples, bucket_bits=16, workers=1, keywords=None,
         protocol_stats=stats)
 
 
-def approx_check(labels, samples, keywords, bits=(128, 256, 512), dims=(32, 64, 128), tau=None, t=2):
+def approx_check(labels, samples, keywords, bits=(128, 256, 512), dims=(32, 48, 64, 128), tau=None, t=2):
     """Plaintext: exact CSLS grouping vs simhash / PCA groupings of the same fuzzy rows."""
     from label_union import circuit_union as cu, simhash
     from label_union.pca import project
@@ -220,8 +220,11 @@ def main(argv=None):
     parser.add_argument('--simhash-u0', type=float, default=1.0,
                         help='simhash: linearisation point of arccos((tau + r + r\')/2) (default 1.0)')
     parser.add_argument('--approx-check', action='store_true',
-                        help='no MPC: compare exact CSLS groupings with simhash (128/256/512 bits) and PCA (32/64/128) '
-                             'groupings on the same fuzzy inputs')
+                        help='no MPC: compare exact CSLS groupings with simhash and PCA groupings on the same fuzzy inputs')
+    parser.add_argument('--approx-bits', type=int, nargs='*', default=[128, 256, 512],
+                        help='--approx-check simhash bit counts (default 128 256 512; none: skip simhash)')
+    parser.add_argument('--approx-dims', type=int, nargs='*', default=[32, 48, 64, 128],
+                        help='--approx-check PCA dimensions (default 32 48 64 128)')
     parser.add_argument('--repeats', type=int, default=1)
     parser.add_argument('--seed', type=int, default=2026)
     parser.add_argument('--simulate', action='store_true',
@@ -300,7 +303,7 @@ def main(argv=None):
             report['inputs'].append(data_info)
             m = max(map(len, labels))
             if args.approx_check:
-                for line in approx_check(labels, samples, keywords):
+                for line in approx_check(labels, samples, keywords, args.approx_bits, args.approx_dims):
                     line.update(clients=n)
                     report.setdefault('approx_check', []).append(line)
                     print(json.dumps(line), flush=True)

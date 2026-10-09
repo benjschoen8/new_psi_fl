@@ -7,7 +7,8 @@
 #
 # Inputs of each party, in this order:
 #   v_i                 per row, 1 bit: valid
-#   sym=1: f_i, h_i     per row: 1 bit symbol flag, HB-bit symbol hash (rows of single letters);
+#   sym=1: f_i, h_i     per row: 1 bit symbol flag, SB-bit symbol code (rows of single letters:
+#                       its character code, SB=8; no hash, no collisions);
 #                       two symbols match iff equal, a symbol never matches an embedding row
 #   kw=masked: party 0: x_e, party 1: y_e (L bits each), from the HE inner-product session
 #              (pair_inner.mpc): party 0 got s_e + rho_e with rho_e < 2^58 (statistical mask),
@@ -33,6 +34,7 @@ HB = 54
 k, G, S, C = int(A.get('k', 256)), int(A.get('G', 16)), int(A.get('S', 16)), int(A.get('C', 0))
 tau = int(A.get('tau', 0))
 sym = int(A.get('sym', 0))
+SB = int(A.get('sb', 8))
 assert nimg <= 64 and k % 64 == 0 and S & (S - 1) == 0
 
 
@@ -55,7 +57,7 @@ def uint(bits, width):             # unsigned bit slices -> signed sbitintvec of
 valid = [rows(p, 1) for p in range(2)]
 if sym:
     flag = [tile(rows(p, 1), p)[0] for p in range(2)]
-    shash = [tile(rows(p, HB), p) for p in range(2)]
+    shash = [tile(rows(p, SB), p) for p in range(2)]
 
 
 def equal(bits_a, bits_b):
