@@ -7,6 +7,8 @@
 #
 # Inputs of each party, in this order:
 #   v_i                 per row, 1 bit: valid
+#   sym=1: f_i, h_i     per row: 1 bit symbol flag, HB-bit symbol hash (rows of single letters);
+#                       two symbols match iff equal, a symbol never matches an embedding row
 #   kw=masked: party 0: x_e, party 1: y_e (L bits each), from the HE inner-product session
 #              (pair_inner.mpc): party 0 got s_e + rho_e with rho_e < 2^58 (statistical mask),
 #              both reduce mod 2^L, party 1 adds tau: s_e - tau = x_e - y_e mod 2^L (|.| < 2^(L-1)),
@@ -30,6 +32,7 @@ L = int(A.get('L', 20))            # masked CSLS width: |s - tau| < 2^18
 HB = 54
 k, G, S, C = int(A.get('k', 256)), int(A.get('G', 16)), int(A.get('S', 16)), int(A.get('C', 0))
 tau = int(A.get('tau', 0))
+sym = int(A.get('sym', 0))
 assert nimg <= 64 and k % 64 == 0 and S & (S - 1) == 0
 
 
@@ -50,16 +53,24 @@ def uint(bits, width):             # unsigned bit slices -> signed sbitintvec of
 
 
 valid = [rows(p, 1) for p in range(2)]
+if sym:
+    flag = [tile(rows(p, 1), p)[0] for p in range(2)]
+    shash = [tile(rows(p, HB), p) for p in range(2)]
+
+
+def equal(bits_a, bits_b):
+    diff = [a ^ b for a, b in zip(bits_a, bits_b)]
+    any1 = diff[0]
+    for b in diff[1:]:
+        any1 = any1 | b
+    return ~any1
+
+
 if kw == 'masked':
     X, Y = (sbitintvec.get_type(L).from_vec(entries(p, L)) for p in range(2))
     match = ~(X - Y).v[-1]                             # sign of s - tau = x - y mod 2^L
 elif kw == 'eq':
-    H = [tile(rows(p, HB), p) for p in range(2)]
-    diff = [a ^ b for a, b in zip(*H)]
-    any1 = diff[0]
-    for b in diff[1:]:
-        any1 = any1 | b
-    match = ~any1
+    match = equal(*[tile(rows(p, HB), p) for p in range(2)])
 elif kw == 'simhash':
     words = k // 64
     code = []
@@ -75,6 +86,8 @@ elif kw == 'simhash':
 else:
     raise CompilerError('kw must be masked, eq or simhash')
 
+if sym:                                                # symbols: equal; else: embedding test
+    match = (flag[0] & flag[1] & equal(*shash)) ^ (~flag[0] & ~flag[1] & match)
 mu = match & tile(valid[0], 0)[0] & tile(valid[1], 1)[0]
 if nimg:
     img = [tile(rows(p, nimg), p) for p in range(2)]

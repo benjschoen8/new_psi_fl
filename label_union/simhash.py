@@ -53,8 +53,8 @@ def kw_match(a, b, tau, k=BITS, S=SCALE, u0=U0):
     """Plaintext predicate of the circuit (ideal functionality of pair version 'simhash')."""
     if a[0] == 'name' or b[0] == 'name':
         return a == b
-    if a[0] == 'sym' or b[0] == 'sym':
-        raise ValueError('simhash supports embeddings only')
+    if a[0] == 'sym' or b[0] == 'sym':                 # symbols as in the exact CSLS test
+        return a[0] == b[0] == 'sym' and a[1] == b[1]
     ham = int(np.sum(code(a[1], k) != code(b[1], k)))
     return S * ham + g_share(a[2], k, S, u0) + g_share(b[2], k, S, u0) <= threshold(tau, k, S, u0)[1]
 

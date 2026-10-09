@@ -160,8 +160,19 @@ def _compile(home, source, args, edabit, timeout, flags=None):
         return program, time.perf_counter() - start, False
 
 
-def _run_session(home, binary, n, program, input_prefix, output_prefix, log_prefix, timeout, *, cancel=None,
-                 prime=PRIME):
+def _run_session(*args, **kwargs):
+    # A party sometimes cannot bind its port (another process or TIME_WAIT): rerun the same
+    # session on fresh ports. Rerunning recomputes the same outputs from the same inputs.
+    for attempt in range(3):
+        try:
+            return _run_session_once(*args, **kwargs)
+        except MPCSessionError as error:
+            if 'Address already in use' not in str(error) or attempt == 2:
+                raise
+
+
+def _run_session_once(home, binary, n, program, input_prefix, output_prefix, log_prefix, timeout, *, cancel=None,
+                      prime=PRIME):
     base = _reserve_ports(n)
     processes, logs = [], []
     start = time.monotonic()
@@ -257,8 +268,8 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
     if any(len(e) != d for e in embeddings) or any((0 if img is None else len(img)) != nimg for _, img in rows):
         raise ValueError('all rows must use the same feature dimensions')
     garbled = pair_protocol in ('hegc', 'simhash')
-    if garbled and (sym or nimg > 64):
-        raise ValueError('garbled pair versions support embeddings/names only and at most 64 image anchors')
+    if garbled and nimg > 64:
+        raise ValueError('garbled pair versions support at most 64 image anchors')
     kw_mode = ('eq' if not fuzzy else 'masked' if pair_protocol == 'hegc' else 'simhash') if garbled else None
     home = Path(root or os.environ.get('MPSPDZ', '')).expanduser().resolve()
     prime = PRIME_NTT if pair_protocol == 'hemi' else PRIME     # both stages share one field
@@ -278,7 +289,7 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
         C = sh.threshold(tau, simhash_bits, sh.SCALE, simhash_u0)[1]
         pair_program, pair_compile, pair_cached = _compile(home, SOURCES / 'pair_gc.mpc',
             [f'm={m}', f'kw={kw_mode}', f'nimg={nimg}', f't={t}', f'L={GC_L}', f'k={simhash_bits}',
-             f'S={sh.SCALE}', f'C={C}', f'G={sh.G_BITS}'], False, timeout, flags=['-G', '-B', '64'])
+             f'S={sh.SCALE}', f'C={C}', f'G={sh.G_BITS}', f'sym={sym}'], False, timeout, flags=['-G', '-B', '64'])
         if kw_mode == 'masked':
             inner_program, inner_compile, inner_cached = _compile(home, SOURCES / 'pair_inner.mpc',
                 [f'm={m}', f'd={d}'], False, timeout, flags=['-F', '40'])
@@ -297,15 +308,19 @@ def mpspdz_pairwise_group(rows, owners, tau=.10, t=2, m=None, root=None, fix=7,
             tokens.append([token for row in padded for token in _row_tokens(*row, fuzzy, sym, d, nimg)])
             continue
         gc = [int(kw is not None) for kw, _ in padded]                    # pair_gc.mpc input order
+        emb = lambda kw: kw is not None and kw[0] == 'emb'
+        if sym:
+            gc += [int(kw is not None and kw[0] == 'sym') for kw, _ in padded]
+            gc += [_h(kw[1]) if kw is not None and kw[0] == 'sym' else 0 for kw, _ in padded]
         if kw_mode == 'eq':
             gc += [_h(kw[1]) if kw is not None else 0 for kw, _ in padded]
         elif kw_mode == 'simhash':
-            gc += [w for kw, _ in padded for w in sh.words(sh.code(kw[1], simhash_bits) if kw is not None
+            gc += [w for kw, _ in padded for w in sh.words(sh.code(kw[1], simhash_bits) if emb(kw)
                                                             else [0] * simhash_bits)]
-            gc += [sh.g_share(kw[2], simhash_bits, sh.SCALE, simhash_u0) if kw is not None else 0 for kw, _ in padded]
+            gc += [sh.g_share(kw[2], simhash_bits, sh.SCALE, simhash_u0) if emb(kw) else 0 for kw, _ in padded]
         tail = [sum(int(b) << i for i, b in enumerate(img)) if img is not None else 0
                 for _, img in padded] if nimg else []          # after the masked scores, if any
-        he = ([v for kw, _ in padded for v in ([int(x) for x in kw[1]] + [int(kw[2])] if kw is not None
+        he = ([v for kw, _ in padded for v in ([int(x) for x in kw[1]] + [int(kw[2])] if emb(kw)
                                                 else [0] * (d + 1))] if kw_mode == 'masked' else None)
         tokens.append((gc, he, tail))
     private_root = home / 'Player-Data'

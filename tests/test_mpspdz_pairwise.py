@@ -187,6 +187,11 @@ def _garbled_case(case, rng):
     if case == 'transitive':
         images = [np.array([1, 1, 0, 0]), np.array([0, 1, 1, 0]), np.array([0, 0, 1, 1])]
         return [(('name', b'x'), image) for image in images], [0, 1, 2], 2 - 1
+    if case == 'sym':                                 # symbols and embeddings mixed (EMNIST letters)
+        e1 = ('emb', np.array([128, 0]), 0)
+        e2 = ('emb', np.array([0, 128]), 0)
+        rows = [(e1, None), (('sym', 'A'), None), (e1, None), (('sym', 'A'), None), (('sym', 'a'), None), (e2, None)]
+        return rows, [0, 0, 1, 1, 2, 2], 1
     d = 16                                            # fuzzy: three planted classes, images 0/1
     base = rng.standard_normal((3, d))
     base /= np.linalg.norm(base, axis=1, keepdims=True)
@@ -203,7 +208,7 @@ def _garbled_case(case, rng):
 
 
 @pytest.mark.skipif(not os.environ.get('MPSPDZ'), reason='set MPSPDZ for actual hegc/simhash integration')
-@pytest.mark.parametrize('case', ['exact', 'transitive', 'fuzzy'])
+@pytest.mark.parametrize('case', ['exact', 'transitive', 'fuzzy', 'sym'])
 @pytest.mark.parametrize('pair', ['hegc', 'simhash'])
 @pytest.mark.parametrize('group_protocol', ['shamir', 'atlas'])
 def test_garbled_pair_versions_match_ideal(case, pair, group_protocol):
@@ -218,7 +223,7 @@ def test_garbled_pair_versions_match_ideal(case, pair, group_protocol):
     assert got == expected
     assert all((keys[a] == keys[b]) == (got[a] == got[b]) for a in range(len(rows)) for b in range(len(rows)))
     assert stats['pair_gc_MB'] > 0
-    if case == 'fuzzy':
+    if case in ('fuzzy', 'sym'):
         assert len(set(expected)) < len(rows)        # the case exercises real matches
         if pair == 'hegc':
             assert stats['pair_he_MB'] > 0
