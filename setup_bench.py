@@ -2,11 +2,11 @@
 times in a FRESH process, results averaged, a log per run and a matplotlib figure per experiment.
 
   clients   5 / 10 / 30 / 50 clients, 5 datasets (MNIST, EMNIST, CIFAR10, FashionMNIST, STL10)
-  datasets  30 clients, 3 / 5 / 7 datasets (3: MNIST, EMNIST, CIFAR10; 7: + CIFAR100, USPS)
+  datasets  30 clients, 3 / 5 / 7 datasets (3: MNIST, EMNIST, CIFAR10; 7: + USPS, EuroSAT)
   estimate  100 clients x 100 labels each: cost model of the same circuits, calibrated by the measured runs
 
 Every client holds all labels of one dataset (clients split evenly over the datasets), every client pads to
---pad-to labels (public policy, default 100), pair sessions: one per client at a time, all clients at once
+--pad-to labels (public policy, default 70 >= EMNIST's 62), pair sessions: one per client at a time, all clients at once
 (--pair-workers 0). Between runs: the MPC processes of the finished run are checked (leftovers killed), the
 run's process has exited (memory, threads, sockets released by the OS), and free memory is logged.
 
@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 FIVE = 'MNIST,EMNIST,CIFAR10,FashionMNIST,STL10'
-DATASETS = {3: 'MNIST,EMNIST,CIFAR10', 5: FIVE, 7: FIVE + ',CIFAR100,USPS'}   # no SVHN
+DATASETS = {3: 'MNIST,EMNIST,CIFAR10', 5: FIVE, 7: FIVE + ',USPS,EuroSAT'}   # no SVHN, no CIFAR100
 MPC_NAMES = ('party.x',)                    # MP-SPDZ executables: *-party.x
 
 
@@ -212,7 +212,7 @@ def _calibration(points):
 def estimate_100(args, calib, log):
     """100 clients x 100 labels (every client the same, padded to 100): cost model x measured/model ratio."""
     from label_union.mpc_model import estimate, group_memory
-    n, m = 100, args.pad_to
+    n, m = 100, args.big_pad
     e = estimate(n, m, args.pca_dim, 45, 1, args.gc_protocol, 1, n // 2, 'plain')
     ratio = calib or 1.
     mb = max(s + r for s, r in zip(e['client_sent_MB'], e['client_received_MB']))
@@ -237,7 +237,7 @@ def big(args, log):
     """Real MPC, n clients with the same full label set (all classes of --big-dataset, padded to --pad-to).
     The grouping keeps a dense (n * pad)^2 share matrix in every party: check the host's memory first."""
     from label_union.mpc_model import estimate, group_memory
-    n, m = args.big_clients, args.pad_to
+    n, m = args.big_clients, args.big_pad
     need = group_memory(n, m, args.big_block_rows) * n / 1e3 + 4                 # + data, Python, OS
     have = mem_available_gb()
     e = estimate(n, m, args.pca_dim, 45, 1, args.gc_protocol, 1, n // 2, 'plain')
@@ -249,7 +249,7 @@ def big(args, log):
     if need > have and not args.force:
         raise SystemExit(f'big: ~{need:.0f} GB RAM needed, {have:.0f} GB free: run it on a larger machine '
                          f'(or --force to try anyway)')
-    pts = [run_point(argparse.Namespace(**{**vars(args), 'repeats': args.big_repeats,          # the grouping
+    pts = [run_point(argparse.Namespace(**{**vars(args), 'repeats': args.big_repeats, 'pad_to': m,   # grouping
                                            'mpc_timeout': max(args.mpc_timeout, 172800)}), 'big',  # session: hours
                      f'{n}x{m}', args.big_dataset, n, log,
                      extra=('--group-block-rows', str(args.big_block_rows)))]
@@ -264,14 +264,15 @@ def main(argv=None):
     p.add_argument('--big-clients', type=int, default=100)
     p.add_argument('--big-dataset', default='CIFAR100', help='every big-run client holds all its classes')
     p.add_argument('--big-repeats', type=int, default=1)
+    p.add_argument('--big-pad', type=int, default=100, help='big run / 100 x 100 estimate: labels per client')
     p.add_argument('--big-block-rows', type=int, default=16, help='grouping work-space rows (memory)')
     p.add_argument('--force', action='store_true', help='big: run even if the memory check says it will not fit')
     p.add_argument('--repeats', type=int, default=3)
     p.add_argument('--clients', type=int, nargs='+', default=[5, 10, 30, 50])
     p.add_argument('--dataset-counts', type=int, nargs='+', default=[3, 5, 7])
     p.add_argument('--dataset-clients', type=int, default=30)
-    p.add_argument('--seven', default=None, help='the 7-dataset list (default: the 5 + CIFAR100, USPS)')
-    p.add_argument('--pad-to', type=int, default=100)
+    p.add_argument('--seven', default=None, help='the 7-dataset list (default: the 5 + USPS, EuroSAT)')
+    p.add_argument('--pad-to', type=int, default=70)
     p.add_argument('--pca-dim', type=int, default=48)
     p.add_argument('--gc-protocol', default='semi-bin')
     p.add_argument('--mpc-timeout', type=float, default=21600)

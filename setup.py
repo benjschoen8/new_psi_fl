@@ -137,7 +137,7 @@ def parser():
     p.add_argument('--pretrained', type=Path, help='Warm-start clients from a revised_protocol checkpoint')
     p.add_argument('--smoke', action='store_true', help='Tiny synthetic CPU-capable experiment; no downloads')
     p.add_argument('--num-new-clients', '--num_new_clients', type=int, default=0)
-    for name in ('mnist', 'emnist', 'fashionmnist', 'cifar10', 'cifar100', 'usps', 'svhn', 'stl10'):
+    for name in ('mnist', 'emnist', 'fashionmnist', 'cifar10', 'cifar100', 'usps', 'svhn', 'stl10', 'eurosat'):
         p.add_argument(f'--num-train-{name}', f'--num_train_{name}', type=int,
                        default=10 if name in ('mnist', 'emnist', 'cifar10') else 0)
     p.add_argument('--num-train-cifar10stl10', type=int, default=0,

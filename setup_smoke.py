@@ -150,7 +150,7 @@ def fixture(n, m, seed):
     return labels, samples
 
 
-CLASSES = dict(MNIST=10, EMNIST=62, FashionMNIST=10, CIFAR10=10, STL10=10, SVHN=10, USPS=10, CIFAR100=100)
+CLASSES = dict(MNIST=10, EMNIST=62, FashionMNIST=10, CIFAR10=10, STL10=10, SVHN=10, USPS=10, CIFAR100=100, EuroSAT=10)
 SHARED = 9                                     # class names CIFAR-10 and STL-10 share (the special clients' pool)
 
 
@@ -201,6 +201,7 @@ def real_inputs(n, args):
     for key in ('seed', 'data_root', 'class_subsets', 'class_share', 'noniid_partition'):
         setattr(data_args, key, getattr(args, key))
     data_args.num_train_cifar10stl10 = mixed
+    data_args.usps_shuffle = False                    # setup: USPS digits keep their true names (no permutation)
     seed_all(args.seed)
     config = OmegaConf.to_container(OmegaConf.load(args.exp_conf), resolve=True)
     if config.get('channels', 3) != 3 or config.get('img_size', 32) != 32:

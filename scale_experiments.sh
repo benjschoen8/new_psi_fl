@@ -42,15 +42,16 @@ setup() {  # setup <name> <clients> <class subsets> <special clients>: the only 
         --methods plain similar --pair-protocol hegc --pca-dim "${PCA_DIM:-48}" --gc-protocol "${GC_PROTOCOL:-semi-bin}" \
         --group-protocol atlas --group-version 2 --pad-max mpc --pair-workers "${PAIR_WORKERS:-8}" \
         --mpc-timeout "${MPC_TIMEOUT:-7200}" --net-mbps "${NET_MBPS:-100}" --net-rtt-ms "${NET_RTT_MS:-20}" \
-        --out "$OUT/$1" 2>&1 | tee "$OUT/$1.log"
+        ${EXTRA_SETUP:-} --out "$OUT/$1" 2>&1 | tee "$OUT/$1.log"
     [[ ${PIPESTATUS[0]} == 0 ]] || fails=1
     $PY -m tests.plot_setup "$OUT/$1/setup.json" || true                # figure + table of this run
 }
 # setup: main split (5-6 labels per client + special clients, sizes are totals)
 has setup && setup setup "${SETUP_CLIENTS:-7 10 30 50}" "${CLASS_SUBSETS:-5,6}" "${MIXED:-2}"
-# setup_full: every client holds ALL labels of one dataset (62 = EMNIST's class count, i.e. all), no special
+# setup_full: every client holds ALL labels of one dataset (62 = EMNIST's class count, i.e. all), padded to
+# PAD_TO (default 70, public policy, no padding MPC), no special
 # clients, the same number of clients per dataset: 5 / 10 / 30 / 50 = 1 / 2 / 6 / 10 per dataset
-has setup_full && setup setup_full "${SETUP_FULL_CLIENTS:-5 10 30 50}" 62,62 0
+has setup_full && EXTRA_SETUP="--pad-to ${PAD_TO:-70}" setup setup_full "${SETUP_FULL_CLIENTS:-5 10 30 50}" 62,62 0
 
 if has train; then                                   # no MPC: ideal functionality
     echo "[$(date '+%F %T')] train: 30 clients (28 + ${MIXED:-2} special), 5 datasets (label split), plain + similar"

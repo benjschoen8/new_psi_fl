@@ -262,6 +262,13 @@ def get_transforms(name):
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
 
+    elif name == 'EuroSAT':                                       # 64x64 satellite photos -> 32x32
+        return transforms.Compose([
+            transforms.Resize((32, 32)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+
     elif name in ['CIFAR10', 'CIFAR100', 'SVHN']:
         return transforms.Compose([
             transforms.ToTensor(),
@@ -289,6 +296,9 @@ def get_raw_dataset_transform(name, root, train=True):
     
     elif name == 'CIFAR10':
         return datasets.CIFAR10(root, train=train, download=True, transform=transform)
+
+    elif name == 'EuroSAT':                                       # one folder of 27,000 images: fixed 80 / 20
+        return EuroSATSplit(datasets.EuroSAT(root, download=True, transform=transform), train)
     
     elif name == 'CIFAR100':
         return datasets.CIFAR100(root, train=train, download=True, transform=transform)
@@ -306,6 +316,31 @@ def get_raw_dataset_transform(name, root, train=True):
         d.classes = [str(i) for i in range(10)]
         return d
     
+EUROSAT_CLASSES = ('AnnualCrop', 'Forest', 'HerbaceousVegetation', 'Highway', 'Industrial', 'Pasture',
+                   'PermanentCrop', 'Residential', 'River', 'SeaLake')          # torchvision's (sorted folder) order
+
+
+class EuroSATSplit(Dataset):
+    """EuroSAT has no official split: a fixed stratified 80 / 20 split (seed 0, independent of the run seed)."""
+    def __init__(self, base, train):
+        y = np.asarray(base.targets)
+        rng = np.random.default_rng(0)
+        pick = []
+        for c in range(len(base.classes)):
+            idx = rng.permutation(np.flatnonzero(y == c))
+            cut = int(round(.8 * len(idx)))
+            pick += (idx[:cut] if train else idx[cut:]).tolist()
+        self.base, self.idx = base, sorted(pick)
+        self.targets = y[self.idx].tolist()
+        self.classes = list(base.classes)
+
+    def __len__(self):
+        return len(self.idx)
+
+    def __getitem__(self, i):
+        return self.base[self.idx[i]]
+
+
 def stl10_classes():
     """STL-10's classes in its label order, named like CIFAR-10's (public dictionary: 'car' is
     'automobile'); 9 of 10 are CIFAR-10 classes, 'monkey' is STL-only (CIFAR-10's 'frog' is CIFAR-only)."""
@@ -331,6 +366,9 @@ def get_readable_class_names(name, root='./data/raw'):
     elif name == 'STL10':
         return stl10_classes()
 
+    elif name == 'EuroSAT':
+        return list(EUROSAT_CLASSES)
+
     elif name == 'CIFAR10':
         # CIFAR10 in-build classes: ['airplane', 'automobile', 'bird', ...]
         d = datasets.CIFAR10(root, train=True, download=True)
@@ -354,7 +392,8 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
         'CIFAR100': (args.num_train_cifar100 + args.num_new_clients) if args.num_train_cifar100 > 0 else 0,
         'USPS': (args.num_train_usps + args.num_new_clients) if args.num_train_usps > 0 else 0,
         'STL10': (getattr(args, 'num_train_stl10', 0) + args.num_new_clients) if getattr(args, 'num_train_stl10', 0) > 0 else 0,
-        'SVHN': (getattr(args, 'num_train_svhn', 0) + args.num_new_clients) if getattr(args, 'num_train_svhn', 0) > 0 else 0
+        'SVHN': (getattr(args, 'num_train_svhn', 0) + args.num_new_clients) if getattr(args, 'num_train_svhn', 0) > 0 else 0,
+        'EuroSAT': (getattr(args, 'num_train_eurosat', 0) + args.num_new_clients) if getattr(args, 'num_train_eurosat', 0) > 0 else 0
     }
     batch_size = exp_conf.get('batch_size', 64)
     dirichlet_alpha = exp_conf.get('dirichlet_alpha', 0.1)
@@ -391,7 +430,7 @@ def load_partitioned_datasets(args, DATA_ROOT, **exp_conf):
         train_dataset = get_raw_dataset_transform(d_name, DATA_ROOT, train=True)
         test_dataset = get_raw_dataset_transform(d_name, DATA_ROOT, train=False)
 
-        if d_name == 'USPS':
+        if d_name == 'USPS' and getattr(args, 'usps_shuffle', True):   # original experiment: permuted USPS labels
             if usps_label_mapping is None:
                 original_labels = list(range(10))
                 shuffled_labels = original_labels.copy()
