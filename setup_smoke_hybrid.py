@@ -167,8 +167,16 @@ def union_quality(labels, index, U):
             tp, fp, fn, tn = tp + (same and pred), fp + (pred and not same), fn + (same and not pred), tn + (not same and not pred)
     den = ((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)) ** .5
     m = index_metrics(labels, index, U, sorted({x for own in labels for x in own}))
+    names_of, slots_of = {}, {}                                   # experimenter diagnostics: what went wrong
+    for c, own in enumerate(labels):
+        for x in own:
+            names_of.setdefault(index[c][x], set()).add(x)
+            slots_of.setdefault(x, set()).add(index[c][x])
+    merged = sorted((sorted(v) for v in names_of.values() if len(v) > 1), key=len, reverse=True)
+    split = sorted((x, len(v)) for x, v in slots_of.items() if len(v) > 1)
     return dict(union_exact=bool(m['exact']), pair_mcc=(tp * tn - fp * fn) / den if den else float(fp == fn == 0),
-                pair_tp=tp, pair_fp=fp, pair_fn=fn, split_labels=len(m['split_labels']), merged_indices=len(m['merged_indices']))
+                pair_tp=tp, pair_fp=fp, pair_fn=fn, split_labels=len(m['split_labels']), merged_indices=len(m['merged_indices']),
+                merged_groups=merged[:60], split_names=split[:60])
 
 
 UNION_ROUNDS = 3        # union/key SecAgg after the MPC: upload tags, masked keys, download result
