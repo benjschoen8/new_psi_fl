@@ -233,6 +233,15 @@ def get_label_counts(dataset, indices):
 # Dataset Transform
 # ==========================================
 def get_transforms(name):
+    if name == 'USPS':                                            # 16x16 digits fill the frame; MNIST digits sit
+        return transforms.Compose([                               # in a 20x20 box with a border: shrink + pad so
+            transforms.Resize((22, 22)),                          # both look alike (same 32x32 framing)
+            transforms.Pad(5),
+            transforms.Grayscale(num_output_channels=3),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5,), (0.5,))
+        ])
+
     if name in ['MNIST', 'FashionMNIST', 'USPS']:
         return transforms.Compose([
             transforms.Resize((32, 32)),                 

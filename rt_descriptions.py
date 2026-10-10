@@ -59,7 +59,7 @@ EN_WORDS = {"airplane": "airplane", "automobile": "car", "bird": "bird", "cat": 
             "T-shirt/top": "tee", "Ankle boot": "boot",
             # EuroSAT: plain words for the land-use classes (its names are CamelCase compounds; the crop and
             # vegetation pairs get distinct words)
-            "AnnualCrop": "cropland", "Forest": "forest", "HerbaceousVegetation": "shrubland", "Highway": "highway",
+            "AnnualCrop": "wheat", "Forest": "forest", "HerbaceousVegetation": "shrubland", "Highway": "highway",
             "Industrial": "industrial", "Pasture": "pasture", "PermanentCrop": "orchard",
             "Residential": "residential", "River": "river", "SeaLake": "lake"}
 
