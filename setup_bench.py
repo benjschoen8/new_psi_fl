@@ -2,7 +2,7 @@
 times in a FRESH process, results averaged, a log per run and a matplotlib figure per experiment.
 
   clients   5 / 10 / 30 / 50 clients, 5 datasets (MNIST, EMNIST, CIFAR10, FashionMNIST, STL10)
-  datasets  30 clients, 3 / 5 / 7 datasets (3: MNIST, EMNIST, CIFAR10; 7: + CIFAR100, SVHN)
+  datasets  30 clients, 3 / 5 / 7 datasets (3: MNIST, EMNIST, CIFAR10; 7: + CIFAR100, USPS)
   estimate  100 clients x 100 labels each: cost model of the same circuits, calibrated by the measured runs
 
 Every client holds all labels of one dataset (clients split evenly over the datasets), every client pads to
@@ -10,7 +10,9 @@ Every client holds all labels of one dataset (clients split evenly over the data
 (--pair-workers 0). Between runs: the MPC processes of the finished run are checked (leftovers killed), the
 run's process has exited (memory, threads, sockets released by the OS), and free memory is logged.
 
-  python -m setup_bench                         # all three, real MPC, 3 runs per point
+  python -m setup_bench                         # clients + datasets, real MPC, 3 runs per point
+  python -m setup_bench --only big              # 100 x 100, real MPC, separately (memory check first)
+  python -m setup_bench --only estimate         # 100 x 100 from the cost model (no MPC)
   python -m setup_bench --only clients --repeats 1
   python -m setup_bench --model --repeats 1     # cost model, minutes: check MCC / U before the real run
 Output: <out>/<experiment>/<point>/run<k>/{run.log, setup.json}, <out>/<experiment>/summary.{csv,json},
@@ -28,7 +30,7 @@ import time
 from pathlib import Path
 
 FIVE = 'MNIST,EMNIST,CIFAR10,FashionMNIST,STL10'
-DATASETS = {3: 'MNIST,EMNIST,CIFAR10', 5: FIVE, 7: FIVE + ',CIFAR100,SVHN'}
+DATASETS = {3: 'MNIST,EMNIST,CIFAR10', 5: FIVE, 7: FIVE + ',CIFAR100,USPS'}   # no SVHN
 MPC_NAMES = ('party.x',)                    # MP-SPDZ executables: *-party.x
 
 
@@ -69,7 +71,7 @@ def clean(log):
     time.sleep(3)                                                # sockets in TIME_WAIT, page cache settle
 
 
-def run_point(args, exp, point, datasets, clients, log):
+def run_point(args, exp, point, datasets, clients, log, extra=()):
     rows = []
     for k in range(1, args.repeats + 1):
         d = args.out / exp / point / f'run{k}'
@@ -86,6 +88,7 @@ def run_point(args, exp, point, datasets, clients, log):
                    '--pad-to', str(args.pad_to), '--pair-workers', '0', '--mpc-timeout', str(args.mpc_timeout),
                    '--net-mbps', str(args.net_mbps), '--net-rtt-ms', str(args.net_rtt_ms),
                    '--seed', str(args.seed), '--repeats', '1', '--out', str(d)] + (['--mpc-model'] if args.model else [])
+            cmd += list(extra)
             log(f'{exp} {point} run {k}/{args.repeats}: start, {clients} clients, datasets {datasets}, '
                 f'free RAM {before:.1f} GB')
             t0 = time.perf_counter()
@@ -230,14 +233,44 @@ def estimate_100(args, calib, log):
     return res
 
 
+def big(args, log):
+    """Real MPC, n clients with the same full label set (all classes of --big-dataset, padded to --pad-to).
+    The grouping keeps a dense (n * pad)^2 share matrix in every party: check the host's memory first."""
+    from label_union.mpc_model import estimate, group_memory
+    n, m = args.big_clients, args.pad_to
+    need = group_memory(n, m, args.big_block_rows) * n / 1e3 + 4                 # + data, Python, OS
+    have = mem_available_gb()
+    e = estimate(n, m, args.pca_dim, 45, 1, args.gc_protocol, 1, n // 2, 'plain')
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else os.cpu_count()
+    hours = ((e['pair_global_MB'] * .02 / cores) + e['group_seconds'] * max(1., n / cores)) * 1.45 / 3600
+    log(f'big: {n} clients x {m} labels ({args.big_dataset}), {e["pair_sessions"]} pair sessions, '
+        f'grouping {e["group_global_MB"] / n / 1e3:.0f} GB MPC traffic per party; needs ~{need:.0f} GB RAM '
+        f'(free {have:.0f} GB), ~{hours:.1f} h per run on {cores} cores (model estimate)')
+    if need > have and not args.force:
+        raise SystemExit(f'big: ~{need:.0f} GB RAM needed, {have:.0f} GB free: run it on a larger machine '
+                         f'(or --force to try anyway)')
+    pts = [run_point(argparse.Namespace(**{**vars(args), 'repeats': args.big_repeats,          # the grouping
+                                           'mpc_timeout': max(args.mpc_timeout, 172800)}), 'big',  # session: hours
+                     f'{n}x{m}', args.big_dataset, n, log,
+                     extra=('--group-block-rows', str(args.big_block_rows)))]
+    summary('big', pts, f'clients ({args.big_dataset}, all classes each)', args.out, log)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--only', nargs='+', choices=('clients', 'datasets', 'estimate'),
-                   default=['clients', 'datasets', 'estimate'])
+    p.add_argument('--only', nargs='+', choices=('clients', 'datasets', 'estimate', 'big'),
+                   default=['clients', 'datasets'],
+                   help='big (separate, real MPC): 100 clients x 100 labels, every client all CIFAR-100 classes')
+    p.add_argument('--big-clients', type=int, default=100)
+    p.add_argument('--big-dataset', default='CIFAR100', help='every big-run client holds all its classes')
+    p.add_argument('--big-repeats', type=int, default=1)
+    p.add_argument('--big-block-rows', type=int, default=16, help='grouping work-space rows (memory)')
+    p.add_argument('--force', action='store_true', help='big: run even if the memory check says it will not fit')
     p.add_argument('--repeats', type=int, default=3)
     p.add_argument('--clients', type=int, nargs='+', default=[5, 10, 30, 50])
     p.add_argument('--dataset-counts', type=int, nargs='+', default=[3, 5, 7])
     p.add_argument('--dataset-clients', type=int, default=30)
+    p.add_argument('--seven', default=None, help='the 7-dataset list (default: the 5 + CIFAR100, USPS)')
     p.add_argument('--pad-to', type=int, default=100)
     p.add_argument('--pca-dim', type=int, default=48)
     p.add_argument('--gc-protocol', default='semi-bin')
@@ -265,6 +298,8 @@ def main(argv=None):
         summary('clients', pts, 'clients (5 datasets)', args.out, log)
         calib = None if args.model else _calibration(pts)
     if 'datasets' in args.only:
+        if args.seven:
+            DATASETS[7] = args.seven
         pts = [run_point(args, 'datasets', str(k), DATASETS[k], args.dataset_clients, log)
                for k in args.dataset_counts]
         summary('datasets', pts, f'datasets ({args.dataset_clients} clients)', args.out, log)
@@ -276,6 +311,8 @@ def main(argv=None):
         if f.exists():                                           # clients figure with the estimate added
             plot(json.loads(f.read_text()), 'clients (5 datasets)', args.out / 'clients', 'clients', est)
             log(f'clients figure with the 100 x 100 estimate: {args.out / "clients" / "time.png"}')
+    if 'big' in args.only:
+        big(args, log)
     log('done')
 
 
